@@ -1,7 +1,9 @@
-# Vectorless RAG — Document Explorer
+# TGG — Tree-Grounded Generation
 
 ## Project Overview
 A desktop application (Tauri v2 + React) that replaces traditional vector/embedding-based RAG with **agentic document exploration**. Documents are parsed into structured trees; an LLM agent navigates them using tools (grep, expand, search, traverse) instead of semantic similarity search.
+
+**TGG = Tree-Grounded Generation** — answers are grounded in the actual tree structure of documents, not cosine similarity over embeddings.
 
 ## Tech Stack
 - **Desktop shell**: Tauri v2 (Rust backend + WebView frontend)
@@ -16,7 +18,7 @@ A desktop application (Tauri v2 + React) that replaces traditional vector/embedd
 React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
                                           ├── Document Engine (parsers, tree builder, OCR)
                                           ├── Agent Runtime (tools, context, planner)
-                                          ├── LLM Provider Layer (Groq, Google AI, OpenRouter, AgentRouter, Ollama)
+                                          ├── LLM Provider Layer (10 providers)
                                           └── SQLite DB (trees, traces, evals)
 ```
 
@@ -25,6 +27,11 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **Google AI Studio** — Gemini 2.5 Pro/Flash (vision capable)
 - **OpenRouter** — Access to Claude, GPT, Llama, Mistral, DeepSeek, etc.
 - **AgentRouter** — Smart LLM routing (GPT-5, DeepSeek, GLM), OpenAI-compatible
+- **Anthropic** — Claude 3.5/3.7/4 Sonnet, Opus, Haiku (direct API)
+- **OpenAI** — GPT-4o, GPT-4.1, o1, o3 mini
+- **DeepSeek** — DeepSeek Chat, DeepSeek Reasoner
+- **xAI / Grok** — Grok 3, Grok 3 Mini
+- **Qwen** — Qwen Max, Qwen Plus, Qwen Turbo
 - **Ollama** — Local models (Llama, Mistral, LLaVA for vision)
 - Unified `LLMProvider` trait in Rust, each provider implements it
 
@@ -48,10 +55,13 @@ The LLM agent gets these tools to navigate document trees:
 - `get_image(node_id)` — retrieve and describe an image node
 - `compare_nodes(node_a, node_b)` — cross-reference two parts
 
+### Query Cancellation
+Queries can be cancelled mid-flight via `abort_query` Tauri command. An `AtomicBool` cancel flag is managed as Tauri state, checked at the top of each agent loop turn.
+
 ### Tracing & Evaluation
 Full Langfuse-style local tracing:
-- Token usage per step, latency, cost tracking
-- Exploration path visualization
+- Token usage per step, latency (LLM turn time distributed across tool calls), cost tracking
+- Exploration path visualization in the Preview Panel
 - Answer quality scoring
 - All stored in local SQLite
 
@@ -108,9 +118,9 @@ src-tauri/src/
   main.rs, lib.rs
   document/   — parsers, tree builder, image extraction
   agent/      — runtime, tools, context management
-  llm/        — provider trait + implementations
+  llm/        — provider trait + implementations (one file per provider)
   db/         — SQLite schema, queries, migrations
-  commands.rs — Tauri IPC command handlers
+  commands.rs — Tauri IPC command handlers (incl. CancelFlag state)
 
 src/
   components/ — sidebar/, chat/, preview/, tree/, canvas/, trace/, common/
@@ -121,9 +131,16 @@ src/
 ```
 
 ## Key Decisions
-- No vector database, no embeddings — agentic exploration only
+- No vector database, no embeddings — agentic tree exploration only
 - Local-first: all data in SQLite + filesystem
 - Background document processing, lazy vision analysis
 - Streaming LLM responses via Tauri events
 - React 19 for frontend (ecosystem, familiarity)
 - Both light + dark themes from day one
+- Cancel flag via `Arc<AtomicBool>` Tauri state (no native invoke cancellation in Tauri)
+- Latency measured per LLM turn (not per local tool exec) and distributed across tool calls
+
+# currentDate
+Today's date is 2026-03-05.
+
+      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.

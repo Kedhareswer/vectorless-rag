@@ -51,15 +51,30 @@ impl LLMProvider for GoogleProvider {
         let mut system_instruction: Option<serde_json::Value> = None;
         let mut contents: Vec<serde_json::Value> = Vec::new();
 
+        // Collect tool result parts so consecutive tool messages merge into one user turn.
+        let mut pending_tool_parts: Vec<serde_json::Value> = Vec::new();
+
+        let flush_tool_parts =
+            |parts: &mut Vec<serde_json::Value>, contents: &mut Vec<serde_json::Value>| {
+                if !parts.is_empty() {
+                    contents.push(json!({
+                        "role": "user",
+                        "parts": std::mem::take(parts),
+                    }));
+                }
+            };
+
         for m in &messages {
             match m.role.as_str() {
                 "system" => {
+                    flush_tool_parts(&mut pending_tool_parts, &mut contents);
                     // Google uses systemInstruction for system prompts
                     system_instruction = Some(json!({
                         "parts": [{ "text": m.content }]
                     }));
                 }
                 "assistant" | "model" => {
+                    flush_tool_parts(&mut pending_tool_parts, &mut contents);
                     if let Some(ref tc_raw) = m.tool_calls_raw {
                         // Assistant message with function calls
                         let mut parts: Vec<serde_json::Value> = Vec::new();
@@ -76,27 +91,38 @@ impl LLMProvider for GoogleProvider {
                     } else {
                         contents.push(json!({
                             "role": "model",
-                            "parts": [{ "text": m.content }]
+                            "parts": [{ "text": if m.content.is_empty() { " " } else { &m.content } }]
                         }));
                     }
                 }
                 "tool" => {
-                    // Tool results in Google format use functionResponse
-                    let tool_name = m.tool_name.as_deref().unwrap_or("unknown");
-                    // Try to parse content as JSON, fall back to wrapping as string
-                    let response_value: serde_json::Value =
+                    // Tool results in Google format use functionResponse.
+                    // Gemini requires `response` to always be a JSON object (Struct).
+                    let tool_name = match m.tool_name.as_deref() {
+                        Some(name) => name,
+                        None => {
+                            eprintln!("[google] Tool result message missing tool_name");
+                            "unspecified_tool"
+                        }
+                    };
+                    let parsed: serde_json::Value =
                         serde_json::from_str(&m.content).unwrap_or(json!({ "result": m.content }));
-                    contents.push(json!({
-                        "role": "user",
-                        "parts": [{
-                            "functionResponse": {
-                                "name": tool_name,
-                                "response": response_value,
-                            }
-                        }]
+                    // Ensure the value is always a JSON object (not array/primitive)
+                    let response_object = match &parsed {
+                        serde_json::Value::Object(_) => parsed,
+                        _ => json!({ "result": parsed }),
+                    };
+                    // Accumulate into pending parts; they'll be flushed as a single
+                    // "user" message before the next non-tool message.
+                    pending_tool_parts.push(json!({
+                        "functionResponse": {
+                            "name": tool_name,
+                            "response": response_object,
+                        }
                     }));
                 }
                 _ => {
+                    flush_tool_parts(&mut pending_tool_parts, &mut contents);
                     // user or other
                     contents.push(json!({
                         "role": "user",
@@ -105,6 +131,9 @@ impl LLMProvider for GoogleProvider {
                 }
             }
         }
+
+        // Flush any remaining tool parts
+        flush_tool_parts(&mut pending_tool_parts, &mut contents);
 
         let mut body = json!({
             "contents": contents,
@@ -150,23 +179,54 @@ impl LLMProvider for GoogleProvider {
 
         let resp_json: serde_json::Value = response.json().await?;
 
-        let parts = &resp_json["candidates"][0]["content"]["parts"];
-        let mut content = None;
+        // Check for blocked/empty candidates
+        let candidates = resp_json["candidates"].as_array();
+        if candidates.is_none() || candidates.is_some_and(|c| c.is_empty()) {
+            let block_reason = resp_json["promptFeedback"]["blockReason"]
+                .as_str()
+                .unwrap_or("unknown");
+            return Err(LLMError::ApiError(format!(
+                "Google API returned no candidates (blockReason: {})",
+                block_reason
+            )));
+        }
+
+        let candidate = &resp_json["candidates"][0];
+        let finish_reason = candidate["finishReason"].as_str().unwrap_or("STOP");
+        if finish_reason == "SAFETY" || finish_reason == "RECITATION" {
+            return Err(LLMError::ApiError(format!(
+                "Google API blocked response (finishReason: {})",
+                finish_reason
+            )));
+        }
+
+        let parts = &candidate["content"]["parts"];
+        let mut content: Option<String> = None;
         let mut tool_calls = Vec::new();
         let mut raw_tool_calls = Vec::new();
+        let mut tool_call_counter = 0u32;
 
         if let Some(parts_arr) = parts.as_array() {
-            for (i, part) in parts_arr.iter().enumerate() {
+            for part in parts_arr {
                 if let Some(text) = part["text"].as_str() {
-                    content = Some(text.to_string());
+                    match &mut content {
+                        Some(existing) => {
+                            existing.push_str("\n\n");
+                            existing.push_str(text);
+                        }
+                        None => {
+                            content = Some(text.to_string());
+                        }
+                    }
                 }
                 if let Some(fc) = part.get("functionCall") {
                     // Store the raw part for conversation history
                     raw_tool_calls.push(part.clone());
                     if let Some(name) = fc["name"].as_str() {
                         let arguments = fc["args"].clone();
-                        // Google doesn't have tool call IDs, generate one
-                        let call_id = format!("google_call_{}", i);
+                        // Generate a stable ID using name + counter
+                        tool_call_counter += 1;
+                        let call_id = format!("google_{}_{}", name, tool_call_counter);
                         tool_calls.push(ToolCall {
                             id: call_id,
                             name: name.to_string(),
@@ -194,7 +254,7 @@ impl LLMProvider for GoogleProvider {
             supports_vision: true,
             supports_tool_calling: true,
             max_context_tokens: 1_048_576,
-            supports_streaming: true,
+            supports_streaming: false,
         }
     }
 

@@ -1,5 +1,5 @@
 /* ============================================
-   CanvasView — SVG radial graph styles
+   CanvasView — SVG tree with CSS-transform pan/zoom
    ============================================ */
 
 .container {
@@ -8,19 +8,78 @@
   height: 100%;
   overflow: hidden;
   position: relative;
+  cursor: grab;
+}
+
+.container:active {
+  cursor: grabbing;
+}
+
+/* Wrapper fills remaining space after controls */
+.svgWrapper {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
 }
 
 .svgCanvas {
   width: 100%;
   height: 100%;
   display: block;
+  /* SVG itself is a fixed 10000x10000 viewport; zoom/pan via transform on inner <g> */
+  overflow: visible;
+}
+
+/* Controls overlay */
+
+.controls {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  box-shadow: var(--shadow-sm);
+}
+
+.controlBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 120ms ease;
+}
+
+.controlBtn:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.zoomLabel {
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-tertiary);
+  padding: 0 4px;
+  min-width: 36px;
+  text-align: center;
 }
 
 /* Edges */
 
 .edge {
   stroke: var(--border);
-  stroke-width: 1;
+  stroke-width: 1.5;
   fill: none;
 }
 
@@ -28,29 +87,14 @@
 
 .node {
   cursor: pointer;
-  transition: transform 150ms ease;
 }
 
-.node:hover .nodeCircle {
-  fill: var(--accent);
-  r: attr(r) + 2;
-}
-
-.nodeCircle {
-  fill: var(--accent-soft);
-  stroke: var(--accent);
-  stroke-width: 1.5;
-  transition: fill var(--transition-fast);
-}
-
-.nodeCircleRoot {
-  fill: var(--accent);
-  stroke: var(--accent-hover);
-  stroke-width: 2;
+.node:hover circle {
+  filter: brightness(1.2);
 }
 
 .nodeLabel {
-  font-size: 9px;
+  font-size: 11px;
   fill: var(--text-secondary);
   text-anchor: middle;
   pointer-events: none;
@@ -58,15 +102,19 @@
 }
 
 .nodeLabelRoot {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   fill: #ffffff;
+  text-anchor: middle;
+  pointer-events: none;
 }
 
 /* Tooltip */
 
 .tooltip {
   position: absolute;
+  left: var(--tooltip-x, 0);
+  top: var(--tooltip-y, 0);
   background-color: var(--bg-secondary);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-md);
@@ -74,7 +122,7 @@
   border-radius: var(--radius-md);
   font-size: 12px;
   color: var(--text-primary);
-  max-width: 240px;
+  max-width: 220px;
   pointer-events: none;
   z-index: 10;
   line-height: 1.4;
@@ -101,12 +149,6 @@
 }
 
 @keyframes ringPulse {
-  0%, 100% {
-    opacity: 1;
-    stroke-width: 2;
-  }
-  50% {
-    opacity: 0.4;
-    stroke-width: 3;
-  }
+  0%, 100% { opacity: 1; stroke-width: 2; }
+  50% { opacity: 0.4; stroke-width: 3; }
 }

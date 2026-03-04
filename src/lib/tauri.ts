@@ -120,6 +120,9 @@ export const setSetting = (key: string, value: string) => invoke<void>('set_sett
 export const chatWithAgent = (message: string, docIds: string[], providerId: string) =>
   invoke<void>('chat_with_agent', { message, docIds, providerId });
 
+// Cancel any in-flight query
+export const abortQuery = () => invoke<void>('abort_query');
+
 // File dialog
 export const openFileDialog = () => invoke<string | null>('open_file_dialog');
 

@@ -1,3 +1,6 @@
+/// Generic OpenAI-compatible provider.
+/// Used for: OpenAI, DeepSeek, xAI (Grok), Alibaba Qwen, and any other
+/// provider that exposes a standard `/v1/chat/completions` endpoint.
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -6,25 +9,28 @@ use super::provider::{
     ToolCall,
 };
 
-pub struct OpenRouterProvider {
+pub struct OpenAICompatProvider {
     pub config: ProviderConfig,
     pub client: reqwest::Client,
+    /// Display name used in error messages.
+    pub display_name: String,
 }
 
-impl OpenRouterProvider {
-    pub fn new(mut config: ProviderConfig) -> Self {
+impl OpenAICompatProvider {
+    pub fn new(mut config: ProviderConfig, display_name: &str, default_base_url: &str) -> Self {
         if config.base_url.is_empty() {
-            config.base_url = "https://openrouter.ai/api/v1".to_string();
+            config.base_url = default_base_url.to_string();
         }
         Self {
             config,
             client: reqwest::Client::new(),
+            display_name: display_name.to_string(),
         }
     }
 }
 
 #[async_trait]
-impl LLMProvider for OpenRouterProvider {
+impl LLMProvider for OpenAICompatProvider {
     async fn chat(
         &self,
         messages: Vec<Message>,
@@ -36,7 +42,7 @@ impl LLMProvider for OpenRouterProvider {
             .as_ref()
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| LLMError::NoApiKey("OpenRouter".to_string()))?;
+            .ok_or_else(|| LLMError::NoApiKey(self.display_name.clone()))?;
 
         let base = self.config.base_url.trim_end_matches('/');
         let url = format!("{}/chat/completions", base);
@@ -45,14 +51,12 @@ impl LLMProvider for OpenRouterProvider {
             .iter()
             .map(|m| {
                 if m.role == "tool" {
-                    // Tool result message
                     json!({
                         "role": "tool",
                         "tool_call_id": m.tool_call_id.as_deref().unwrap_or(""),
                         "content": m.content,
                     })
                 } else if let Some(ref tc_raw) = m.tool_calls_raw {
-                    // Assistant message that requested tool calls
                     let mut msg = json!({
                         "role": "assistant",
                         "tool_calls": tc_raw,
@@ -96,8 +100,6 @@ impl LLMProvider for OpenRouterProvider {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
-            .header("HTTP-Referer", "https://tgg.app")
-            .header("X-Title", "TGG")
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -107,8 +109,8 @@ impl LLMProvider for OpenRouterProvider {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(LLMError::ApiError(format!(
-                "OpenRouter API error {}: {}",
-                status, text
+                "{} API error {}: {}",
+                self.display_name, status, text
             )));
         }
 
@@ -124,9 +126,7 @@ impl LLMProvider for OpenRouterProvider {
                 raw_tool_calls.push(call.clone());
                 let call_id = call["id"].as_str().unwrap_or("").to_string();
                 if let Some(name) = call["function"]["name"].as_str() {
-                    let args_str = call["function"]["arguments"]
-                        .as_str()
-                        .unwrap_or("{}");
+                    let args_str = call["function"]["arguments"].as_str().unwrap_or("{}");
                     let arguments: serde_json::Value =
                         serde_json::from_str(args_str).unwrap_or_default();
                     tool_calls.push(ToolCall {
@@ -153,11 +153,11 @@ impl LLMProvider for OpenRouterProvider {
             supports_vision: true,
             supports_tool_calling: true,
             max_context_tokens: 128_000,
-            supports_streaming: true,
+            supports_streaming: false,
         }
     }
 
     fn name(&self) -> &str {
-        "openrouter"
+        &self.config.name
     }
 }

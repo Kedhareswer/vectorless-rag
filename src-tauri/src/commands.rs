@@ -1,6 +1,10 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
+
+/// Shared cancellation flag — set to true to abort the running query.
+pub struct CancelFlag(pub Arc<AtomicBool>);
 
 /// Truncate a string at a UTF-8 safe char boundary.
 fn safe_truncate(s: &str, max_bytes: usize) -> &str {
@@ -21,7 +25,7 @@ use crate::db::{Database, DocumentSummary, ConversationRecord, MessageRecord, Co
 use crate::document::parser::get_parser_for_file;
 use crate::document::tree::{DocumentTree, TreeNode, TreeNodeSummary};
 use crate::llm::provider::{LLMProvider, Message, ProviderConfig, Tool};
-use crate::llm::{AgentRouterProvider, GoogleProvider, GroqProvider, OllamaProvider, OpenRouterProvider};
+use crate::llm::{AgentRouterProvider, AnthropicProvider, GoogleProvider, GroqProvider, OllamaProvider, OpenAICompatProvider, OpenRouterProvider};
 
 // --- Document commands ---
 
@@ -168,15 +172,19 @@ pub fn save_conversation(
     title: String,
     doc_id: Option<String>,
 ) -> Result<(), String> {
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     let now = chrono::Utc::now().to_rfc3339();
+    // Preserve original created_at if conversation already exists
+    let created_at = db.get_conversation_created_at(&id)
+        .unwrap_or(None)
+        .unwrap_or_else(|| now.clone());
     let conv = ConversationRecord {
         id,
         title,
         doc_id,
-        created_at: now.clone(),
+        created_at,
         updated_at: now,
     };
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.save_conversation(&conv).map_err(|e| e.to_string())
 }
 
@@ -272,6 +280,14 @@ pub fn get_bookmarks(
 pub fn delete_bookmark(db: State<Mutex<Database>>, id: String) -> Result<(), String> {
     let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.delete_bookmark(&id).map_err(|e| e.to_string())
+}
+
+// --- Cancel command ---
+
+#[tauri::command]
+pub fn abort_query(cancel_flag: State<CancelFlag>) -> Result<(), String> {
+    cancel_flag.0.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 // --- File dialog command ---
@@ -384,6 +400,27 @@ fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, Strin
         "google" => Ok(Box::new(GoogleProvider::new(config))),
         "openrouter" => Ok(Box::new(OpenRouterProvider::new(config))),
         "agentrouter" => Ok(Box::new(AgentRouterProvider::new(config))),
+        "anthropic" => Ok(Box::new(AnthropicProvider::new(config))),
+        "openai" => Ok(Box::new(OpenAICompatProvider::new(
+            config,
+            "OpenAI",
+            "https://api.openai.com/v1",
+        ))),
+        "deepseek" => Ok(Box::new(OpenAICompatProvider::new(
+            config,
+            "DeepSeek",
+            "https://api.deepseek.com/v1",
+        ))),
+        "xai" => Ok(Box::new(OpenAICompatProvider::new(
+            config,
+            "xAI",
+            "https://api.x.ai/v1",
+        ))),
+        "qwen" => Ok(Box::new(OpenAICompatProvider::new(
+            config,
+            "Qwen",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        ))),
         _ => Err(format!("Unknown provider: {}", config.name)),
     }
 }
@@ -448,10 +485,15 @@ fn estimate_cost(provider_name: &str, total_tokens: u32) -> f64 {
     // Approximate blended cost rates per 1M tokens (input+output averaged)
     let rate_per_million = match provider_name {
         "groq" => 0.10,
-        "google" => 0.0, // Free tier
+        "google" => 0.0,       // Free tier
         "openrouter" => 1.50,
         "agentrouter" => 0.75,
-        "ollama" => 0.0, // Local
+        "ollama" => 0.0,       // Local
+        "anthropic" => 9.00,   // Sonnet 4.6 blended ~$9/MTok
+        "openai" => 5.00,      // GPT-4o blended ~$5/MTok
+        "deepseek" => 0.35,    // deepseek-chat blended ~$0.35/MTok
+        "xai" => 0.35,         // grok-3-mini blended ~$0.35/MTok
+        "qwen" => 0.20,        // qwen-plus blended ~$0.20/MTok
         _ => 0.50,
     };
     (total_tokens as f64 / 1_000_000.0) * rate_per_million
@@ -461,10 +503,15 @@ fn estimate_cost(provider_name: &str, total_tokens: u32) -> f64 {
 pub async fn chat_with_agent(
     app: tauri::AppHandle,
     db: State<'_, Mutex<Database>>,
+    cancel_flag: State<'_, CancelFlag>,
     message: String,
     doc_ids: Vec<String>,
     provider_id: String,
+    conv_id: Option<String>,
 ) -> Result<(), String> {
+    // Reset cancel flag at start of new query
+    cancel_flag.0.store(false, Ordering::SeqCst);
+    let cancel = cancel_flag.0.clone();
     // Generate a unique request correlation ID
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -530,19 +577,22 @@ pub async fn chat_with_agent(
     let system_prompt = build_system_prompt(&overview_text, &exploration_hint);
     let tools = build_llm_tools(&provider_name);
     let adaptive_max_steps = processed.recommended_max_steps;
-    let mut runtime = AgentRuntime::new(adaptive_max_steps);
 
-    // Pre-search and pre-expand against the primary tree
+    // Use a separate throwaway runtime for pre-computation so it doesn't
+    // eat into the agent's actual step budget.
+    let mut pre_runtime = AgentRuntime::new(10);
+
+    // Pre-search against the primary tree (only for targeted queries)
     let mut pre_search_results = Vec::new();
     if matches!(processed.intent, QueryIntent::Entity | QueryIntent::Specific | QueryIntent::Factual) {
-        for term in processed.search_terms.iter().take(3) {
+        for term in processed.search_terms.iter().take(2) {
             let mut params = HashMap::new();
             params.insert("query".to_string(), serde_json::Value::String(term.clone()));
             let input = ToolInput {
                 tool: AgentTool::SearchContent,
                 params,
             };
-            if let Ok(output) = runtime.execute_tool(primary_tree, &input) {
+            if let Ok(output) = pre_runtime.execute_tool(primary_tree, &input) {
                 let result_str = serde_json::to_string(&output.result).unwrap_or_default();
                 if result_str.len() > 20 {
                     pre_search_results.push((term.clone(), result_str));
@@ -551,9 +601,11 @@ pub async fn chat_with_agent(
         }
     }
 
+    // Only pre-expand for very small documents (≤3 top-level nodes) to avoid
+    // burning tokens on large docs. The agent can expand selectively.
     let tree_overview_summary = primary_tree.tree_overview();
     let mut pre_expand_results = Vec::new();
-    if tree_overview_summary.len() <= 5 {
+    if tree_overview_summary.len() <= 3 {
         for summary in &tree_overview_summary {
             let mut params = HashMap::new();
             params.insert("node_id".to_string(), serde_json::Value::String(summary.id.clone()));
@@ -561,16 +613,19 @@ pub async fn chat_with_agent(
                 tool: AgentTool::ExpandNode,
                 params,
             };
-            if let Ok(output) = runtime.execute_tool(primary_tree, &input) {
+            if let Ok(output) = pre_runtime.execute_tool(primary_tree, &input) {
                 let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                if result_str.len() > 4000 {
-                    pre_expand_results.push(format!("{}... [truncated]", safe_truncate(&result_str, 4000)));
+                if result_str.len() > 2000 {
+                    pre_expand_results.push(format!("{}... [truncated]", safe_truncate(&result_str, 2000)));
                 } else {
                     pre_expand_results.push(result_str);
                 }
             }
         }
     }
+
+    // Now create the real runtime with full budget for the agent
+    let mut runtime = AgentRuntime::new(adaptive_max_steps);
 
     let mut messages: Vec<Message> = vec![
         Message::text("system", &system_prompt),
@@ -603,9 +658,34 @@ pub async fn chat_with_agent(
     let max_nudges = 2u32;
     let min_tool_calls = processed.min_tool_calls;
     let overall_start = tokio::time::Instant::now();
+    // Cap message context to prevent unbounded memory growth
+    let max_context_messages = 60;
 
     for _llm_turn in 1..=max_steps {
-        let step_start = tokio::time::Instant::now();
+
+        // Check if user cancelled
+        if cancel.load(Ordering::SeqCst) {
+            let _ = app.emit(
+                "chat-error",
+                ChatErrorEvent {
+                    request_id: request_id.clone(),
+                    error: "Query cancelled.".to_string(),
+                },
+            );
+            return Ok(());
+        }
+
+        // Trim oldest mid-conversation messages if context grows too large,
+        // keeping system prompt (first) and recent messages
+        if messages.len() > max_context_messages {
+            let keep_front = 2; // system + user query
+            let keep_back = max_context_messages - keep_front;
+            let drain_end = messages.len() - keep_back;
+            messages.drain(keep_front..drain_end);
+        }
+
+        // Time the LLM call itself — this is the real latency
+        let llm_turn_start = tokio::time::Instant::now();
 
         let llm_response = match provider
             .chat(messages.clone(), Some(tools.clone()))
@@ -659,7 +739,8 @@ pub async fn chat_with_agent(
             );
 
             runtime.context.compute_relevance_scores();
-            save_trace_data(&db, &doc_ids[0], &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
+            let trace_conv_id = conv_id.as_deref().unwrap_or(&doc_ids[0]);
+            save_trace_data(&db, trace_conv_id, &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
             return Ok(());
         }
 
@@ -668,6 +749,12 @@ pub async fn chat_with_agent(
             assistant_content,
             llm_response.raw_tool_calls.clone(),
         ));
+
+        // LLM call time — distribute evenly across all tool calls in the batch
+        let llm_turn_ms = llm_turn_start.elapsed().as_millis() as u64;
+        let turn_tool_count = llm_response.tool_calls.len() as u32;
+        let tokens_per_tool = if turn_tool_count > 0 { llm_response.tokens_used / turn_tool_count } else { 0 };
+        let latency_per_tool = if turn_tool_count > 0 { llm_turn_ms / turn_tool_count as u64 } else { 0 };
 
         for tool_call in &llm_response.tool_calls {
             let agent_tool = match AgentTool::from_name(&tool_call.name) {
@@ -718,6 +805,8 @@ pub async fn chat_with_agent(
                 params: params.clone(),
             };
 
+            let tool_exec_start = tokio::time::Instant::now();
+
             // For multi-doc: try all trees if the node isn't found in the primary one
             let tool_result = {
                 let mut result = None;
@@ -752,15 +841,16 @@ pub async fn chat_with_agent(
             // Extract node IDs for live visualization (Feature 4)
             let node_ids = extract_node_ids(&tool_call.name, &params, &tool_result);
 
-            let tool_latency = step_start.elapsed().as_millis() as u64;
+            // Include both LLM time (distributed) and local tool execution time
+            let tool_exec_ms = tool_exec_start.elapsed().as_millis() as u64;
             let _ = app.emit(
                 "exploration-step-complete",
                 ExplorationStepCompleteEvent {
                     request_id: request_id.clone(),
                     step_number: current_step,
                     output_summary: output_summary.clone(),
-                    tokens_used: llm_response.tokens_used,
-                    latency_ms: tool_latency,
+                    tokens_used: tokens_per_tool,
+                    latency_ms: latency_per_tool + tool_exec_ms,
                     node_ids,
                 },
             );
@@ -807,14 +897,15 @@ pub async fn chat_with_agent(
     );
 
     runtime.context.compute_relevance_scores();
-    save_trace_data(&db, &doc_ids[0], &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
+    let trace_conv_id = conv_id.as_deref().unwrap_or(&doc_ids[0]);
+    save_trace_data(&db, trace_conv_id, &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
 
     Ok(())
 }
 
 fn save_trace_data(
     db: &State<'_, Mutex<Database>>,
-    doc_id: &str,
+    conv_id: &str,
     provider_name: &str,
     runtime: &AgentRuntime,
     total_tokens: u32,
@@ -823,14 +914,13 @@ fn save_trace_data(
     let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
 
     let trace_id = uuid::Uuid::new_v4().to_string();
-    let msg_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let cost = estimate_cost(provider_name, total_tokens);
 
     let trace = TraceRecord {
         id: trace_id.clone(),
-        conv_id: doc_id.to_string(),
+        conv_id: conv_id.to_string(),
         provider_name: provider_name.to_string(),
         total_tokens: total_tokens as i64,
         total_cost: cost,
@@ -840,10 +930,11 @@ fn save_trace_data(
     };
     db.save_trace(&trace).map_err(|e| e.to_string())?;
 
+    // Link steps to trace_id so get_steps(trace_id) can retrieve them
     for step in &runtime.steps {
         let step_record = StepRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            msg_id: msg_id.clone(),
+            msg_id: trace_id.clone(),
             tool_name: step.tool.clone(),
             input_json: step.input_summary.clone(),
             output_json: step.output_summary.clone(),

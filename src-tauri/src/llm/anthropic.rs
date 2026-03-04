@@ -1,3 +1,6 @@
+/// Anthropic Claude provider — uses the native Anthropic Messages API.
+/// Different from OpenAI-compatible providers: uses `x-api-key` header,
+/// `anthropic-version` header, and a distinct request/response schema.
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -6,21 +9,18 @@ use super::provider::{
     ToolCall,
 };
 
-/// AgentRouter is an Anthropic-compatible API proxy.
-/// It uses the Anthropic Messages API format with `x-api-key` auth.
-pub struct AgentRouterProvider {
+pub struct AnthropicProvider {
     pub config: ProviderConfig,
     pub client: reqwest::Client,
 }
 
-impl AgentRouterProvider {
+impl AnthropicProvider {
     pub fn new(mut config: ProviderConfig) -> Self {
         if config.base_url.is_empty() {
-            config.base_url = "https://agentrouter.org/v1".to_string();
+            config.base_url = "https://api.anthropic.com/v1".to_string();
         }
-        // Default to a Claude model since AgentRouter proxies to Anthropic
         if config.model.is_empty() {
-            config.model = "claude-sonnet-4-5-20250514".to_string();
+            config.model = "claude-sonnet-4-6".to_string();
         }
         Self {
             config,
@@ -30,7 +30,7 @@ impl AgentRouterProvider {
 }
 
 #[async_trait]
-impl LLMProvider for AgentRouterProvider {
+impl LLMProvider for AnthropicProvider {
     async fn chat(
         &self,
         messages: Vec<Message>,
@@ -42,52 +42,56 @@ impl LLMProvider for AgentRouterProvider {
             .as_ref()
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| LLMError::NoApiKey("AgentRouter".to_string()))?;
+            .ok_or_else(|| LLMError::NoApiKey("Anthropic".to_string()))?;
 
         let base = self.config.base_url.trim_end_matches('/');
         let url = format!("{}/messages", base);
 
-        // Separate system messages from conversation messages (Anthropic format)
-        let mut system_parts: Vec<String> = Vec::new();
+        // Separate system prompt from conversation messages
+        let mut system_content = String::new();
         let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
         for m in &messages {
             match m.role.as_str() {
                 "system" => {
-                    system_parts.push(m.content.clone());
+                    if !system_content.is_empty() {
+                        system_content.push_str("\n\n");
+                    }
+                    system_content.push_str(&m.content);
                 }
-                "assistant" | "model" => {
+                "tool" => {
+                    // Anthropic tool_result goes into a user turn with content blocks
+                    let tool_call_id = m.tool_call_id.as_deref().unwrap_or("");
+                    let tool_name = m.tool_name.as_deref().unwrap_or("unknown");
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&m.content).unwrap_or(json!({ "result": m.content }));
+                    anthropic_messages.push(json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_call_id,
+                            "tool_name": tool_name,
+                            "content": [{ "type": "text", "text": serde_json::to_string(&parsed).unwrap_or_default() }],
+                        }]
+                    }));
+                }
+                "assistant" => {
                     if let Some(ref tc_raw) = m.tool_calls_raw {
-                        // Convert OpenAI-style tool_calls to Anthropic tool_use blocks
+                        // Tool call: Anthropic uses tool_use content blocks
                         let mut content_blocks: Vec<serde_json::Value> = Vec::new();
                         if !m.content.is_empty() {
                             content_blocks.push(json!({ "type": "text", "text": m.content }));
                         }
+                        // tc_raw is stored in OpenAI format; convert to Anthropic tool_use blocks
                         for tc in tc_raw {
-                            // tc may be OpenAI format {id, type, function:{name,arguments}}
-                            // or a direct tool call object — normalise to Anthropic format
-                            let (call_id, name, input) = if tc.get("function").is_some() {
-                                let id = tc["id"].as_str().unwrap_or("").to_string();
-                                let fn_name = tc["function"]["name"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let args_str =
-                                    tc["function"]["arguments"].as_str().unwrap_or("{}");
-                                let input: serde_json::Value =
-                                    serde_json::from_str(args_str).unwrap_or_default();
-                                (id, fn_name, input)
-                            } else {
-                                // Already Anthropic-style or unknown — pass through
-                                let id = tc["id"].as_str().unwrap_or("").to_string();
-                                let name =
-                                    tc["name"].as_str().unwrap_or("").to_string();
-                                let input = tc["input"].clone();
-                                (id, name, input)
-                            };
+                            let id = tc["id"].as_str().unwrap_or("").to_string();
+                            let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                            let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+                            let input: serde_json::Value =
+                                serde_json::from_str(args_str).unwrap_or_default();
                             content_blocks.push(json!({
                                 "type": "tool_use",
-                                "id": call_id,
+                                "id": id,
                                 "name": name,
                                 "input": input,
                             }));
@@ -97,46 +101,20 @@ impl LLMProvider for AgentRouterProvider {
                             "content": content_blocks,
                         }));
                     } else {
+                        let text = if m.content.is_empty() { " " } else { &m.content };
                         anthropic_messages.push(json!({
                             "role": "assistant",
-                            "content": m.content,
+                            "content": [{ "type": "text", "text": text }],
                         }));
                     }
                 }
-                "tool" => {
-                    // Anthropic tool results live inside a user message as tool_result blocks.
-                    // Merge consecutive tool results into a single user message.
-                    let tool_call_id = m.tool_call_id.as_deref().unwrap_or("").to_string();
-                    let result_block = json!({
-                        "type": "tool_result",
-                        "tool_use_id": tool_call_id,
-                        "content": m.content,
-                    });
-
-                    // Append to the last user message if it already contains tool_result blocks,
-                    // otherwise start a new user message.
-                    if let Some(last) = anthropic_messages.last_mut() {
-                        if last["role"] == "user" {
-                            if let Some(arr) = last["content"].as_array_mut() {
-                                if arr.iter().any(|b| b["type"] == "tool_result") {
-                                    arr.push(result_block);
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                    anthropic_messages.push(json!({
-                        "role": "user",
-                        "content": [result_block],
-                    }));
-                }
-                _ => {
-                    // user or other
+                "user" => {
                     anthropic_messages.push(json!({
                         "role": "user",
                         "content": m.content,
                     }));
                 }
+                _ => {}
             }
         }
 
@@ -146,8 +124,8 @@ impl LLMProvider for AgentRouterProvider {
             "messages": anthropic_messages,
         });
 
-        if !system_parts.is_empty() {
-            body["system"] = json!(system_parts.join("\n\n"));
+        if !system_content.is_empty() {
+            body["system"] = json!(system_content);
         }
 
         if let Some(tools) = tools {
@@ -167,7 +145,7 @@ impl LLMProvider for AgentRouterProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", &api_key)
+            .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&body)
@@ -177,25 +155,17 @@ impl LLMProvider for AgentRouterProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            let hint = if status.as_u16() == 401 {
-                " — API key rejected. Generate a new key at https://agentrouter.org/console/token"
-            } else if status.as_u16() == 429 {
-                " — Rate limited. Please wait and try again."
-            } else if status.as_u16() == 403 {
-                " — Access forbidden. Check your AgentRouter account and key permissions."
-            } else {
-                ""
-            };
             return Err(LLMError::ApiError(format!(
-                "AgentRouter API error {}: {}{}",
-                status, text, hint
+                "Anthropic API error {}: {}",
+                status, text
             )));
         }
 
         let resp_json: serde_json::Value = response.json().await?;
 
-        // Anthropic Messages API response format
+        // Anthropic response: { content: [{type, text/id/name/input}], stop_reason, usage }
         let content_blocks = resp_json["content"].as_array();
+
         let mut text_content: Option<String> = None;
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut raw_tool_calls: Vec<serde_json::Value> = Vec::new();
@@ -210,20 +180,25 @@ impl LLMProvider for AgentRouterProvider {
                                     existing.push_str("\n\n");
                                     existing.push_str(t);
                                 }
-                                None => {
-                                    text_content = Some(t.to_string());
-                                }
+                                None => text_content = Some(t.to_string()),
                             }
                         }
                     }
                     Some("tool_use") => {
-                        // Store as OpenAI-compatible raw format for our conversation history
                         let call_id = block["id"].as_str().unwrap_or("").to_string();
                         let name = block["name"].as_str().unwrap_or("").to_string();
                         let input = block["input"].clone();
 
-                        // Keep raw in Anthropic format for re-sending
-                        raw_tool_calls.push(block.clone());
+                        // Store in OpenAI-compatible format for our conversation history
+                        let args_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+                        raw_tool_calls.push(json!({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args_str,
+                            }
+                        }));
 
                         tool_calls.push(ToolCall {
                             id: call_id,
@@ -236,14 +211,9 @@ impl LLMProvider for AgentRouterProvider {
             }
         }
 
-        let tokens_used = resp_json["usage"]["input_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(
-                resp_json["usage"]["output_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
-            ) as u32;
+        let input_tokens = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+        let tokens_used = input_tokens + output_tokens;
 
         Ok(LLMResponse {
             content: text_content,
@@ -263,6 +233,6 @@ impl LLMProvider for AgentRouterProvider {
     }
 
     fn name(&self) -> &str {
-        "agentrouter"
+        "anthropic"
     }
 }

@@ -69,7 +69,7 @@ pub fn preprocess_query(query: &str) -> ProcessedQuery {
 
     let complexity = estimate_complexity(query, &search_terms, &intent);
     // Map complexity to max_steps: clamp between 6 and 15
-    let recommended_max_steps = (complexity * 2 + 4).min(15).max(6);
+    let recommended_max_steps = (complexity * 2 + 4).clamp(6, 15);
 
     ProcessedQuery {
         original: query.to_string(),

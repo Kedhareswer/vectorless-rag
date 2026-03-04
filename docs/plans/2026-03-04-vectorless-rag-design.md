@@ -1,4 +1,4 @@
-# Vectorless RAG — Full Design Document
+# TGG — Tree-Grounded Generation — Full Design Document
 **Date**: 2026-03-04
 **Status**: Approved
 

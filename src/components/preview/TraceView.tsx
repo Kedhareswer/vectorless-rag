@@ -9,7 +9,6 @@ import clsx from 'clsx';
 import { useChatStore, PROVIDER_COST_RATES } from '../../stores/chat';
 import { useSettingsStore } from '../../stores/settings';
 import type { ExplorationStep } from '../../stores/chat';
-import sharedStyles from './PreviewPanel.module.css';
 import styles from './TraceView.module.css';
 
 /** Format milliseconds into a human-friendly string */
@@ -115,7 +114,7 @@ export function TraceView() {
     return { tokens, cost, latency, steps: explorationSteps.length, providerName };
   }, [explorationSteps, providerName]);
 
-  // Empty state
+  // Empty state — compact, no bloated placeholder
   if (explorationSteps.length === 0) {
     return (
       <div className={styles.container}>
@@ -137,14 +136,9 @@ export function TraceView() {
             <span className={styles.statValue}>0</span>
           </div>
         </div>
-        <div className={sharedStyles.placeholder}>
-          <Activity size={32} className={sharedStyles.placeholderIcon} />
-          <p className={sharedStyles.placeholderText}>
-            Run a query to see exploration traces
-          </p>
-          <p className={sharedStyles.placeholderHint}>
-            Exploration steps will be visualized as a timeline
-          </p>
+        <div className={styles.emptyState}>
+          <Activity size={16} className={styles.emptyIcon} />
+          <span>Run a query to see traces</span>
         </div>
       </div>
     );

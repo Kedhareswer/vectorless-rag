@@ -4,8 +4,10 @@ pub mod llm;
 pub mod db;
 pub mod commands;
 
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use db::Database;
+use commands::CancelFlag;
 
 /// Resolve the database path inside the platform app data directory.
 /// Falls back to current directory if unavailable.
@@ -53,6 +55,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(db))
+        .manage(CancelFlag(Arc::new(AtomicBool::new(false))))
         .invoke_handler(tauri::generate_handler![
             commands::list_documents,
             commands::get_document,
@@ -75,6 +78,7 @@ pub fn run() {
             commands::save_message,
             commands::delete_conversation,
             commands::chat_with_agent,
+            commands::abort_query,
             commands::open_file_dialog,
             commands::save_bookmark,
             commands::get_bookmarks,

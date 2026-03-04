@@ -65,7 +65,7 @@ export function PreviewPanel() {
       {!collapsed && (
         <div className={styles.sections}>
           {/* Document Structure Section */}
-          <div className={styles.section}>
+          <div className={clsx(styles.section, !structureOpen && styles.sectionCollapsed)}>
             <div className={styles.sectionHeaderRow}>
               <button
                 type="button"
@@ -104,7 +104,7 @@ export function PreviewPanel() {
           </div>
 
           {/* Exploration Trace Section */}
-          <div className={styles.section}>
+          <div className={clsx(styles.section, !traceOpen && styles.sectionCollapsed)}>
             <button
               type="button"
               className={clsx(styles.sectionHeader, traceOpen && styles.sectionHeaderOpen)}

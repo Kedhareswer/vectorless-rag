@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   X,
   Plus,
@@ -20,7 +20,57 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type ProviderPreset = 'ollama' | 'groq' | 'google' | 'openrouter' | 'agentrouter';
+type ProviderPreset =
+  | 'ollama'
+  | 'groq'
+  | 'google'
+  | 'openrouter'
+  | 'agentrouter'
+  | 'anthropic'
+  | 'openai'
+  | 'deepseek'
+  | 'xai'
+  | 'qwen';
+
+/** Models that have a fixed dropdown (provider -> model list) */
+const PROVIDER_MODELS: Partial<Record<ProviderPreset, string[]>> = {
+  google: [
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+    'gemini-2.0-pro',
+  ],
+  anthropic: [
+    'claude-haiku-4-5-20251001',
+    'claude-sonnet-4-6',
+    'claude-opus-4-6',
+  ],
+  openai: [
+    'gpt-4o-mini',
+    'gpt-4o',
+    'gpt-4.1-mini',
+    'gpt-4.1',
+    'o3-mini',
+    'o4-mini',
+  ],
+  deepseek: [
+    'deepseek-chat',
+    'deepseek-reasoner',
+  ],
+  xai: [
+    'grok-3-mini',
+    'grok-3',
+    'grok-4-fast-non-reasoning',
+    'grok-4-0709',
+  ],
+  qwen: [
+    'qwen-turbo',
+    'qwen-plus',
+    'qwen-max',
+    'qwq-plus',
+    'qwen3-coder-plus',
+  ],
+};
 
 const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isActive'>> = {
   ollama: {
@@ -39,19 +89,49 @@ const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isAc
     name: 'google',
     apiKey: '',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
   },
   openrouter: {
     name: 'openrouter',
     apiKey: '',
     baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'anthropic/claude-sonnet-4',
+    model: 'anthropic/claude-sonnet-4-6',
   },
   agentrouter: {
     name: 'agentrouter',
     apiKey: '',
     baseUrl: 'https://agentrouter.org/v1',
-    model: 'gpt-5',
+    model: 'claude-sonnet-4-5-20250514',
+  },
+  anthropic: {
+    name: 'anthropic',
+    apiKey: '',
+    baseUrl: 'https://api.anthropic.com/v1',
+    model: 'claude-haiku-4-5-20251001',
+  },
+  openai: {
+    name: 'openai',
+    apiKey: '',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+  },
+  deepseek: {
+    name: 'deepseek',
+    apiKey: '',
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+  },
+  xai: {
+    name: 'xai',
+    apiKey: '',
+    baseUrl: 'https://api.x.ai/v1',
+    model: 'grok-3-mini',
+  },
+  qwen: {
+    name: 'qwen',
+    apiKey: '',
+    baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-turbo',
   },
 };
 
@@ -92,10 +172,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     return cache;
   });
 
+  const overlayRef = useRef<HTMLDivElement>(null);
+
   // Sync from store if it changes externally
   useEffect(() => {
     setDraftProviders(savedProviders.map((p) => ({ ...p })));
   }, [savedProviders]);
+
+  // Focus dialog on mount for keyboard accessibility
+  useEffect(() => {
+    overlayRef.current?.focus();
+  }, []);
 
   const handleOverlayClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
@@ -140,7 +227,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   };
 
   const removeDraftProvider = (id: string) => {
-    setDraftProviders((prev) => prev.filter((p) => p.id !== id));
+    setDraftProviders((prev) => {
+      const remaining = prev.filter((p) => p.id !== id);
+      // If we removed the active provider, promote the first remaining one
+      if (remaining.length > 0 && !remaining.some((p) => p.isActive)) {
+        remaining[0] = { ...remaining[0], isActive: true };
+      }
+      return remaining;
+    });
   };
 
   const setDraftActive = (id: string) => {
@@ -198,6 +292,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       onClose();
     } catch (err) {
       console.warn('Failed to save settings:', err);
+      // Don't close — let the user see the error banner
     } finally {
       setIsSaving(false);
     }
@@ -205,6 +300,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
   return (
     <div
+      ref={overlayRef}
       className={styles.overlay}
       onClick={handleOverlayClick}
       onKeyDown={handleKeyDown}
@@ -272,11 +368,22 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                           handlePresetChange(provider.id, e.target.value as ProviderPreset)
                         }
                       >
-                        <option value="ollama">Ollama (Local)</option>
-                        <option value="groq">Groq</option>
-                        <option value="google">Google AI Studio</option>
-                        <option value="openrouter">OpenRouter</option>
-                        <option value="agentrouter">AgentRouter</option>
+                        <optgroup label="Cloud — Direct">
+                          <option value="anthropic">Anthropic (Claude)</option>
+                          <option value="openai">OpenAI</option>
+                          <option value="google">Google AI Studio</option>
+                          <option value="deepseek">DeepSeek</option>
+                          <option value="xai">xAI (Grok)</option>
+                          <option value="qwen">Alibaba Qwen</option>
+                          <option value="groq">Groq</option>
+                        </optgroup>
+                        <optgroup label="Routers / Aggregators">
+                          <option value="openrouter">OpenRouter</option>
+                          <option value="agentrouter">AgentRouter</option>
+                        </optgroup>
+                        <optgroup label="Local">
+                          <option value="ollama">Ollama (Local)</option>
+                        </optgroup>
                       </select>
                     </div>
 
@@ -291,6 +398,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                             updateDraftProvider(provider.id, { apiKey: e.target.value })
                           }
                           placeholder="Enter API key..."
+                          autoComplete="off"
                         />
                       </div>
                     )}
@@ -310,15 +418,30 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
                     <div className={styles.field}>
                       <label className={styles.fieldLabel}>Model</label>
-                      <input
-                        type="text"
-                        className={styles.fieldInput}
-                        value={provider.model}
-                        onChange={(e) =>
-                          updateDraftProvider(provider.id, { model: e.target.value })
-                        }
-                        placeholder="Model name"
-                      />
+                      {PROVIDER_MODELS[provider.name as ProviderPreset] ? (
+                        <select
+                          className={styles.fieldSelect}
+                          value={provider.model}
+                          onChange={(e) =>
+                            updateDraftProvider(provider.id, { model: e.target.value })
+                          }
+                          title="Select model"
+                        >
+                          {PROVIDER_MODELS[provider.name as ProviderPreset]!.map((m) => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type="text"
+                          className={styles.fieldInput}
+                          value={provider.model}
+                          onChange={(e) =>
+                            updateDraftProvider(provider.id, { model: e.target.value })
+                          }
+                          placeholder="Model name"
+                        />
+                      )}
                     </div>
 
                     <div className={clsx(styles.field, styles.fieldFull)}>
@@ -331,7 +454,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                             provider.isActive && styles.toggleActive
                           )}
                           onClick={() => setDraftActive(provider.id)}
-                          title={provider.isActive ? 'Active' : 'Set as active'}
+                          aria-label={provider.isActive ? 'Active provider' : 'Set as active provider'}
+                          aria-pressed={provider.isActive ? "true" : "false"}
                         />
                       </div>
                     </div>

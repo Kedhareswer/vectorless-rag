@@ -205,6 +205,16 @@ impl Database {
 
     // --- Conversation CRUD ---
 
+    pub fn get_conversation_created_at(&self, conv_id: &str) -> Result<Option<String>, DbError> {
+        let mut stmt = self.conn.prepare("SELECT created_at FROM conversations WHERE id = ?1")?;
+        let result = stmt.query_row(params![conv_id], |row| row.get(0));
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DbError::SqliteError(e)),
+        }
+    }
+
     pub fn save_conversation(&self, conv: &ConversationRecord) -> Result<(), DbError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO conversations (id, title, doc_id, created_at, updated_at)
@@ -279,6 +289,17 @@ impl Database {
 
     pub fn delete_conversation(&self, conv_id: &str) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction()?;
+        // Delete exploration steps linked to traces for this conversation
+        tx.execute(
+            "DELETE FROM exploration_steps WHERE msg_id IN (SELECT id FROM traces WHERE conv_id = ?1)",
+            params![conv_id],
+        )?;
+        // Delete evals linked to traces for this conversation
+        tx.execute(
+            "DELETE FROM evals WHERE trace_id IN (SELECT id FROM traces WHERE conv_id = ?1)",
+            params![conv_id],
+        )?;
+        tx.execute("DELETE FROM traces WHERE conv_id = ?1", params![conv_id])?;
         tx.execute("DELETE FROM messages WHERE conv_id = ?1", params![conv_id])?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", params![conv_id])?;
         tx.commit()?;

@@ -4,6 +4,8 @@ pub mod google;
 pub mod openrouter;
 pub mod ollama;
 pub mod agentrouter;
+pub mod anthropic;
+pub mod openai_compat;
 
 pub use provider::{LLMProvider, LLMResponse, LLMError, Message, Tool, ToolCall, ProviderCapabilities, ProviderConfig};
 pub use ollama::OllamaProvider;
@@ -11,3 +13,5 @@ pub use groq::GroqProvider;
 pub use google::GoogleProvider;
 pub use openrouter::OpenRouterProvider;
 pub use agentrouter::AgentRouterProvider;
+pub use anthropic::AnthropicProvider;
+pub use openai_compat::OpenAICompatProvider;

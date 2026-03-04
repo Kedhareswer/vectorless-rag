@@ -68,7 +68,7 @@ impl DocumentParser for MarkdownParser {
                     if in_heading {
                         let mut node = TreeNode::new(NodeType::Section, current_text.trim().to_string());
                         node.metadata.insert("heading_level".to_string(), serde_json::json!(heading_level));
-                        while section_stack.last().map_or(false, |(lvl, _)| *lvl >= heading_level) {
+                        while section_stack.last().is_some_and(|(lvl, _)| *lvl >= heading_level) {
                             section_stack.pop();
                         }
                         let parent = section_stack
@@ -87,7 +87,7 @@ impl DocumentParser for MarkdownParser {
                 Event::End(TagEnd::Paragraph) => {
                     if in_paragraph && !current_text.trim().is_empty() {
                         let mut node = TreeNode::new(NodeType::Paragraph, current_text.trim().to_string());
-                        let wc = current_text.trim().split_whitespace().count();
+                        let wc = current_text.split_whitespace().count();
                         node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
                         let _ = tree.add_node(&current_parent, node);
                     }
@@ -315,7 +315,7 @@ impl DocumentParser for PdfParser {
                     };
 
                     // Pop stack to correct nesting level
-                    while section_stack.last().map_or(false, |(l, _)| *l >= level) {
+                    while section_stack.last().is_some_and(|(l, _)| *l >= level) {
                         section_stack.pop();
                     }
                     let parent = section_stack
@@ -403,12 +403,7 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
     let mut current_parent = root_id.to_string();
     let mut section_stack: Vec<(u32, String)> = vec![(0, root_id.to_string())];
 
-    loop {
-        let event = match reader.read_event_into(&mut buf) {
-            Ok(e) => e,
-            Err(_) => break,
-        };
-
+    while let Ok(event) = reader.read_event_into(&mut buf) {
         match event {
             Event::Start(ref e) => match e.local_name().as_ref() {
                 b"p" if !in_table => {
@@ -455,7 +450,7 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
                                 .unwrap_or(1);
                             let mut node = TreeNode::new(NodeType::Section, trimmed);
                             node.metadata.insert("heading_level".to_string(), serde_json::json!(level));
-                            while section_stack.last().map_or(false, |(l, _)| *l >= level) {
+                            while section_stack.last().is_some_and(|(l, _)| *l >= level) {
                                 section_stack.pop();
                             }
                             let parent = section_stack

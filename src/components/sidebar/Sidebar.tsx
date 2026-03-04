@@ -326,7 +326,7 @@ export function Sidebar() {
         )}
 
         <div className={styles.about}>
-          <span className={styles.aboutText}>Vectorless RAG v0.1.0</span>
+          <span className={styles.aboutText}>TGG v0.1.0</span>
         </div>
       </aside>
 

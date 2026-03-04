@@ -405,6 +405,15 @@
   background-color: var(--accent-hover);
 }
 
+.stopButton {
+  background-color: #ef4444;
+  color: white;
+}
+
+.stopButton:hover {
+  background-color: #dc2626;
+}
+
 /* Keyframe references */
 
 @keyframes fadeIn {

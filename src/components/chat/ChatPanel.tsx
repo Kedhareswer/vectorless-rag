@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, Fragment } from 'react';
-import { Send, FileText, Compass, AlertCircle, Server, Upload } from 'lucide-react';
+import { Send, Square, FileText, Compass, AlertCircle, Server, Upload } from 'lucide-react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -7,7 +7,7 @@ import clsx from 'clsx';
 import { useChatStore, type ExplorationStep, type ChatMessage } from '../../stores/chat';
 import { useDocumentsStore } from '../../stores/documents';
 import { useSettingsStore } from '../../stores/settings';
-import { chatWithAgent } from '../../lib/tauri';
+import { chatWithAgent, abortQuery } from '../../lib/tauri';
 import { ThinkingBlock } from './ThinkingBlock';
 import styles from './ChatPanel.module.css';
 
@@ -83,7 +83,7 @@ export function ChatPanel() {
       listenerPromises.push(
         listen<ExplorationStepCompletePayload>('exploration-step-complete', (event) => {
           const payload = event.payload;
-          updateStepStatus(payload.stepNumber, 'complete', payload.outputSummary, payload.nodeIds);
+          updateStepStatus(payload.stepNumber, 'complete', payload.outputSummary, payload.nodeIds, payload.tokensUsed, payload.latencyMs);
         })
       );
 
@@ -367,14 +367,26 @@ export function ChatPanel() {
             rows={1}
             disabled={isExploring}
           />
-          <button
-            className={clsx(styles.sendButton, input.trim() && styles.sendButtonActive)}
-            onClick={handleSend}
-            disabled={!input.trim() || isExploring}
-            title="Send message"
-          >
-            <Send size={18} />
-          </button>
+          {isExploring ? (
+            <button
+              type="button"
+              className={clsx(styles.sendButton, styles.stopButton)}
+              onClick={() => abortQuery().catch(() => {})}
+              title="Stop query"
+            >
+              <Square size={16} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className={clsx(styles.sendButton, input.trim() && styles.sendButtonActive)}
+              onClick={handleSend}
+              disabled={!input.trim()}
+              title="Send message"
+            >
+              <Send size={18} />
+            </button>
+          )}
         </div>
       </div>
     </div>

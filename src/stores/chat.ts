@@ -40,6 +40,11 @@ export const PROVIDER_COST_RATES: Record<string, number> = {
   openrouter: 1.50,
   agentrouter: 0.75,
   ollama: 0.0,
+  anthropic: 9.00,
+  openai: 5.00,
+  deepseek: 0.35,
+  xai: 0.35,
+  qwen: 0.20,
 };
 
 interface ChatState {
@@ -57,7 +62,7 @@ interface ChatState {
   setActiveConversation: (id: string | null) => void;
   addMessage: (message: ChatMessage) => void;
   addExplorationStep: (step: ExplorationStep) => void;
-  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[]) => void;
+  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[], tokensUsed?: number, latencyMs?: number) => void;
   setIsExploring: (exploring: boolean) => void;
   clearSteps: () => void;
   loadConversations: () => Promise<void>;
@@ -135,7 +140,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[]) => {
+  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[], tokensUsed?: number, latencyMs?: number) => {
     set((state) => {
       const newVisited = nodeIds
         ? [...state.visitedNodeIds, ...nodeIds.filter((id) => !state.visitedNodeIds.includes(id))]
@@ -144,7 +149,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         explorationSteps: state.explorationSteps.map((step) =>
           step.stepNumber === stepNumber
-            ? { ...step, status, ...(outputSummary !== undefined ? { outputSummary } : {}), ...(nodeIds ? { nodeIds } : {}) }
+            ? {
+                ...step,
+                status,
+                ...(outputSummary !== undefined ? { outputSummary } : {}),
+                ...(nodeIds ? { nodeIds } : {}),
+                ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+                ...(latencyMs !== undefined ? { latencyMs } : {}),
+              }
             : step
         ),
         visitedNodeIds: newVisited,

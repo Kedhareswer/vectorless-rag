@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Vectorless RAG",
+  "productName": "TGG",
   "version": "0.1.0",
   "identifier": "com.vectorless.rag",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Vectorless RAG",
+        "title": "TGG — Tree-Grounded Generation",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
