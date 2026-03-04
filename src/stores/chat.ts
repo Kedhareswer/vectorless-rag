@@ -182,6 +182,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadMessages: async (convId: string) => {
     try {
       const records = await getConversationMessages(convId);
+      // Guard against stale results: only apply if this conversation is still active
+      if (get().activeConversationId !== convId) return;
       const messages: ChatMessage[] = records.map((r) => ({
         id: r.id,
         role: r.role as 'user' | 'assistant',
@@ -200,7 +202,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((state) => ({
         conversations: state.conversations.filter((c) => c.id !== convId),
         ...(state.activeConversationId === convId
-          ? { activeConversationId: null, messages: [], explorationSteps: [] }
+          ? { activeConversationId: null, messages: [], explorationSteps: [], visitedNodeIds: [], activeNodeId: null }
           : {}),
       }));
     } catch (err) {

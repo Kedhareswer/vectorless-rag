@@ -1,6 +1,19 @@
 use serde::Serialize;
+use std::collections::HashSet;
 use std::time::Instant;
 use thiserror::Error;
+
+/// Truncate a string at a UTF-8 safe char boundary.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 use crate::document::tree::{DocumentTree, NodeType};
 use super::context::ExplorationContext;
@@ -148,7 +161,7 @@ impl AgentRuntime {
                             "id": id,
                             "node_type": node.node_type,
                             "content_preview": if node.content.len() > 200 {
-                                format!("{}...", &node.content[..200])
+                                format!("{}...", safe_truncate(&node.content, 200))
                             } else {
                                 node.content.clone()
                             },
@@ -242,7 +255,7 @@ impl AgentRuntime {
         // Record the step in the exploration context
         let output_preview = result.to_string();
         let output_summary = if output_preview.len() > 100 {
-            format!("{}...", &output_preview[..100])
+            format!("{}...", safe_truncate(&output_preview, 100))
         } else {
             output_preview
         };
@@ -275,15 +288,18 @@ impl AgentRuntime {
 
 /// Check if a node is a descendant of a potential ancestor in the tree.
 fn is_descendant_of(tree: &DocumentTree, node_id: &str, ancestor_id: &str) -> bool {
-    // BFS from ancestor to find node
     let mut queue = vec![ancestor_id.to_string()];
+    let mut visited = HashSet::new();
+    visited.insert(ancestor_id.to_string());
     while let Some(current) = queue.pop() {
         if let Some(node) = tree.get_node(&current) {
             for child_id in &node.children {
                 if child_id == node_id {
                     return true;
                 }
-                queue.push(child_id.clone());
+                if visited.insert(child_id.clone()) {
+                    queue.push(child_id.clone());
+                }
             }
         }
     }
@@ -300,16 +316,20 @@ fn build_parent_chain(tree: &DocumentTree, target_id: &str) -> Vec<serde_json::V
         }
     }
 
-    // Walk from target to root
+    // Walk from target to root with cycle guard
     let mut chain = Vec::new();
     let mut current = target_id.to_string();
+    let mut visited = HashSet::new();
     loop {
+        if !visited.insert(current.clone()) {
+            break; // cycle detected
+        }
         if let Some(node) = tree.get_node(&current) {
             chain.push(serde_json::json!({
                 "id": node.id,
                 "node_type": node.node_type,
                 "content_preview": if node.content.len() > 80 {
-                    format!("{}...", &node.content[..80])
+                    format!("{}...", safe_truncate(&node.content, 80))
                 } else {
                     node.content.clone()
                 },

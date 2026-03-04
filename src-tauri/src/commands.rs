@@ -2,6 +2,18 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Emitter, State};
 
+/// Truncate a string at a UTF-8 safe char boundary.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 use crate::agent::runtime::{build_system_prompt, AgentRuntime};
 use crate::agent::tools::{AgentTool, ToolInput};
 use crate::agent::query::{preprocess_query, QueryIntent};
@@ -479,7 +491,7 @@ pub async fn chat_with_agent(
             if let Ok(output) = runtime.execute_tool(primary_tree, &input) {
                 let result_str = serde_json::to_string(&output.result).unwrap_or_default();
                 if result_str.len() > 4000 {
-                    pre_expand_results.push(format!("{}... [truncated]", &result_str[..4000]));
+                    pre_expand_results.push(format!("{}... [truncated]", safe_truncate(&result_str, 4000)));
                 } else {
                     pre_expand_results.push(result_str);
                 }
@@ -497,7 +509,7 @@ pub async fn chat_with_agent(
         if !pre_search_results.is_empty() {
             context_parts.push("I've already searched the document for relevant content. Here are the search results:".to_string());
             for (term, result) in &pre_search_results {
-                let truncated = if result.len() > 2000 { &result[..2000] } else { result };
+                let truncated = if result.len() > 2000 { safe_truncate(result, 2000) } else { result };
                 context_parts.push(format!("Search for \"{}\": {}", term, truncated));
             }
         }
@@ -514,6 +526,8 @@ pub async fn chat_with_agent(
     let max_steps = 10u32;
     let mut total_tokens = 0u32;
     let mut tool_call_counter = 0u32;
+    let mut nudge_counter = 0u32;
+    let max_nudges = 2u32;
     let min_tool_calls = processed.min_tool_calls;
     let overall_start = tokio::time::Instant::now();
 
@@ -539,7 +553,8 @@ pub async fn chat_with_agent(
         total_tokens += llm_response.tokens_used;
 
         if llm_response.tool_calls.is_empty() {
-            if tool_call_counter < min_tool_calls && _llm_turn < max_steps {
+            if tool_call_counter < min_tool_calls && _llm_turn < max_steps && nudge_counter < max_nudges {
+                nudge_counter += 1;
                 let nudge = format!(
                     "You haven't explored the document enough yet ({} tool calls, minimum {} required). \
                      Use expand_node to read the actual content of relevant sections before answering. \
@@ -591,7 +606,7 @@ pub async fn chat_with_agent(
             let input_summary = match serde_json::to_string(&tool_call.arguments) {
                 Ok(s) => {
                     if s.len() > 100 {
-                        format!("{}...", &s[..100])
+                        format!("{}...", safe_truncate(&s, 100))
                     } else {
                         s
                     }
@@ -631,7 +646,7 @@ pub async fn chat_with_agent(
                             let result_str = serde_json::to_string(&output.result)
                                 .unwrap_or_else(|_| "{}".to_string());
                             if result_str.len() > 4000 {
-                                result = Some(format!("{}... [truncated, {} chars total]", &result_str[..4000], result_str.len()));
+                                result = Some(format!("{}... [truncated, {} chars total]", safe_truncate(&result_str, 4000), result_str.len()));
                             } else {
                                 result = Some(result_str);
                             }
@@ -648,7 +663,7 @@ pub async fn chat_with_agent(
             };
 
             let output_summary = if tool_result.len() > 150 {
-                format!("{}...", &tool_result[..150])
+                format!("{}...", safe_truncate(&tool_result, 150))
             } else {
                 tool_result.clone()
             };

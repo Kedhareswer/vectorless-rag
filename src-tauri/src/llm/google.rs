@@ -41,8 +41,8 @@ impl LLMProvider for GoogleProvider {
 
         let base = self.config.base_url.trim_end_matches('/');
         let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            base, self.config.model, api_key
+            "{}/models/{}:generateContent",
+            base, self.config.model
         );
 
         // Convert messages to Google's format
@@ -134,6 +134,7 @@ impl LLMProvider for GoogleProvider {
             .client
             .post(&url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", &api_key)
             .json(&body)
             .send()
             .await?;

@@ -228,14 +228,16 @@ export function Sidebar() {
                     documents.map((doc) => {
                       const isSelected = selectedDocumentIds.includes(doc.id);
                       return (
-                        <button
+                        <div
                           key={doc.id}
+                          tabIndex={0}
                           className={clsx(
                             styles.listItem,
                             activeDocumentId === doc.id && styles.listItemActive,
                             isSelected && multiSelectActive && styles.listItemSelected
                           )}
                           onClick={(e) => handleDocClick(e, doc.id)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleDocClick(e as unknown as React.MouseEvent, doc.id); }}
                           title="Click to select. Ctrl+click for multi-select."
                         >
                           {multiSelectActive && (
@@ -254,7 +256,7 @@ export function Sidebar() {
                           >
                             <Trash2 size={12} />
                           </button>
-                        </button>
+                        </div>
                       );
                     })
                   )}
@@ -290,13 +292,15 @@ export function Sidebar() {
                     <p className={styles.emptyText}>No conversations yet</p>
                   ) : (
                     conversations.map((conv) => (
-                      <button
+                      <div
                         key={conv.id}
+                        tabIndex={0}
                         className={clsx(
                           styles.listItem,
                           activeConversationId === conv.id && styles.listItemActive
                         )}
                         onClick={() => setActiveConversation(conv.id)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setActiveConversation(conv.id); }}
                       >
                         <MessageSquare size={14} className={styles.listItemIcon} />
                         <span className={styles.listItemName}>{conv.title}</span>
@@ -308,7 +312,7 @@ export function Sidebar() {
                         >
                           <Trash2 size={12} />
                         </button>
-                      </button>
+                      </div>
                     ))
                   )}
                 </div>
