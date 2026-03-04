@@ -136,3 +136,17 @@ export const getConversationMessages = (convId: string) => invoke<MessageRecord[
 export const saveMessageIPC = (id: string, convId: string, role: string, content: string) =>
   invoke<void>('save_message', { id, convId, role, content });
 export const deleteConversationIPC = (convId: string) => invoke<void>('delete_conversation', { convId });
+
+// Bookmarks
+export interface BookmarkRecord {
+  id: string;
+  doc_id: string;
+  node_id: string;
+  label: string;
+  created_at: string;
+}
+
+export const saveBookmark = (docId: string, nodeId: string, label: string) =>
+  invoke<void>('save_bookmark', { docId, nodeId, label });
+export const getBookmarks = (docId: string) => invoke<BookmarkRecord[]>('get_bookmarks', { docId });
+export const deleteBookmark = (id: string) => invoke<void>('delete_bookmark', { id });

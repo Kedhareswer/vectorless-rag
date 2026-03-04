@@ -164,7 +164,11 @@ impl DocumentTree {
             .filter_map(|child_id| {
                 self.nodes.get(child_id).map(|node| {
                     let preview = if node.content.len() > 100 {
-                        format!("{}...", &node.content[..100])
+                        let mut end = 100;
+                        while end > 0 && !node.content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &node.content[..end])
                     } else {
                         node.content.clone()
                     };

@@ -86,7 +86,9 @@ impl DocumentParser for MarkdownParser {
                 Event::Start(Tag::Paragraph) => { current_text.clear(); in_paragraph = true; }
                 Event::End(TagEnd::Paragraph) => {
                     if in_paragraph && !current_text.trim().is_empty() {
-                        let node = TreeNode::new(NodeType::Paragraph, current_text.trim().to_string());
+                        let mut node = TreeNode::new(NodeType::Paragraph, current_text.trim().to_string());
+                        let wc = current_text.trim().split_whitespace().count();
+                        node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
                         let _ = tree.add_node(&current_parent, node);
                     }
                     current_text.clear();
@@ -197,11 +199,12 @@ impl DocumentParser for CodeParser {
         for (idx, chunk) in lines.chunks(60).enumerate() {
             let chunk_text = chunk.join("\n");
             if !chunk_text.trim().is_empty() {
+                let wc = chunk_text.split_whitespace().count();
                 let mut node = TreeNode::new(NodeType::CodeBlock, chunk_text);
                 node.metadata.insert("language".to_string(), serde_json::json!(self.language));
-                node.metadata.insert("lines".to_string(), serde_json::json!(
-                    format!("{}-{}", idx * 60 + 1, (idx + 1) * 60)
-                ));
+                node.metadata.insert("line_start".to_string(), serde_json::json!(idx * 60 + 1));
+                node.metadata.insert("line_end".to_string(), serde_json::json!((idx + 1) * 60));
+                node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
                 let _ = tree.add_node(&root_id, node);
             }
         }
@@ -213,6 +216,40 @@ impl DocumentParser for CodeParser {
 
 pub struct PdfParser;
 
+/// Heuristic: detect if a line looks like a heading.
+/// Returns Some(level) if it looks like a heading, None otherwise.
+fn detect_heading(line: &str) -> Option<u32> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.len() > 120 {
+        return None;
+    }
+    // Numbered headings: "1.", "1.1", "Chapter 1", "Section 2.3"
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("chapter ") {
+        return Some(1);
+    }
+    if lower.starts_with("section ") {
+        return Some(2);
+    }
+    // ALL CAPS short line (likely a heading)
+    if trimmed.len() <= 80
+        && trimmed.len() >= 3
+        && trimmed.chars().all(|c| c.is_uppercase() || c.is_whitespace() || c.is_ascii_punctuation() || c.is_ascii_digit())
+        && trimmed.chars().any(|c| c.is_alphabetic())
+    {
+        return Some(2);
+    }
+    // Short line (< 60 chars) ending without period — often a heading
+    if trimmed.len() <= 60 && !trimmed.ends_with('.') && !trimmed.ends_with(',') && !trimmed.contains("  ") {
+        // Must have at least one letter, and first char is uppercase or digit
+        let first = trimmed.chars().next().unwrap_or(' ');
+        if (first.is_uppercase() || first.is_ascii_digit()) && trimmed.chars().any(|c| c.is_alphabetic()) {
+            return Some(3);
+        }
+    }
+    None
+}
+
 impl DocumentParser for PdfParser {
     fn parse(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
         let file_name = file_name_of(file_path);
@@ -222,6 +259,13 @@ impl DocumentParser for PdfParser {
 
         let mut tree = DocumentTree::new(file_name, DocType::Pdf);
         let root_id = tree.root_id.clone();
+
+        // Store total page estimate in root metadata
+        // pdf_extract joins pages with form-feed; count them for approximate page count
+        let page_count = text.matches('\u{000C}').count().max(1);
+        if let Some(root) = tree.nodes.get_mut(&root_id) {
+            root.metadata.insert("page_count".to_string(), serde_json::json!(page_count));
+        }
 
         if text.trim().is_empty() {
             let node = TreeNode::new(
@@ -234,31 +278,78 @@ impl DocumentParser for PdfParser {
             return Ok(tree);
         }
 
-        // Group paragraphs into sections of 10, using first line as section title
-        let paras: Vec<&str> = text
-            .split("\n\n")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Split by form-feed to get per-page text; fall back to whole doc as page 1
+        let pages: Vec<&str> = if text.contains('\u{000C}') {
+            text.split('\u{000C}').collect()
+        } else {
+            vec![&text]
+        };
 
-        for chunk in paras.chunks(10) {
-            // Use the first paragraph (truncated) as the section title
-            let title = chunk.first().map(|p| {
-                let first_line = p.lines().next().unwrap_or(p);
-                let trimmed = first_line.trim();
-                if trimmed.len() > 80 {
-                    format!("{}...", &trimmed[..80])
+        let mut section_stack: Vec<(u32, String)> = vec![(0, root_id.clone())];
+        let mut current_parent = root_id.clone();
+        let mut para_index = 0u32;
+
+        for (page_idx, page_text) in pages.iter().enumerate() {
+            let page_num = page_idx + 1;
+
+            let paras: Vec<&str> = page_text
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            for para in &paras {
+                let first_line = para.lines().next().unwrap_or(para).trim();
+
+                // Check if this paragraph starts with a heading-like line
+                if let Some(level) = detect_heading(first_line) {
+                    let title = {
+                        let t = first_line;
+                        if t.len() > 80 {
+                            let mut end = 80;
+                            while end > 0 && !t.is_char_boundary(end) { end -= 1; }
+                            format!("{}...", &t[..end])
+                        } else {
+                            t.to_string()
+                        }
+                    };
+
+                    // Pop stack to correct nesting level
+                    while section_stack.last().map_or(false, |(l, _)| *l >= level) {
+                        section_stack.pop();
+                    }
+                    let parent = section_stack
+                        .last()
+                        .map(|(_, id)| id.clone())
+                        .unwrap_or_else(|| root_id.clone());
+
+                    let mut section = TreeNode::new(NodeType::Section, title);
+                    section.metadata.insert("heading_level".to_string(), serde_json::json!(level));
+                    section.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
+                    let section_id = section.id.clone();
+                    let _ = tree.add_node(&parent, section);
+                    section_stack.push((level, section_id.clone()));
+                    current_parent = section_id;
+
+                    // If the paragraph has more lines beyond the heading, add them as content
+                    let rest: String = para.lines().skip(1).collect::<Vec<_>>().join("\n");
+                    let rest = rest.trim();
+                    if !rest.is_empty() {
+                        let mut node = TreeNode::new(NodeType::Paragraph, rest.to_string());
+                        node.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
+                        let wc = rest.split_whitespace().count();
+                        node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
+                        let _ = tree.add_node(&current_parent, node);
+                    }
                 } else {
-                    trimmed.to_string()
+                    let mut node = TreeNode::new(NodeType::Paragraph, para.to_string());
+                    node.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
+                    let wc = para.split_whitespace().count();
+                    node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
+                    node.metadata.insert("para_index".to_string(), serde_json::json!(para_index));
+                    let _ = tree.add_node(&current_parent, node);
                 }
-            }).unwrap_or_else(|| "Section".to_string());
-
-            let section = TreeNode::new(NodeType::Section, title);
-            let section_id = section.id.clone();
-            let _ = tree.add_node(&root_id, section);
-            for para in chunk {
-                let node = TreeNode::new(NodeType::Paragraph, para.to_string());
-                let _ = tree.add_node(&section_id, node);
+                para_index += 1;
             }
         }
 

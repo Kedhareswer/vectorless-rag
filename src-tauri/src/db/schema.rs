@@ -124,6 +124,14 @@ impl Database {
                 is_active INTEGER NOT NULL DEFAULT 0,
                 capabilities_json TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -270,8 +278,10 @@ impl Database {
     }
 
     pub fn delete_conversation(&self, conv_id: &str) -> Result<(), DbError> {
-        self.conn.execute("DELETE FROM messages WHERE conv_id = ?1", params![conv_id])?;
-        self.conn.execute("DELETE FROM conversations WHERE id = ?1", params![conv_id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM messages WHERE conv_id = ?1", params![conv_id])?;
+        tx.execute("DELETE FROM conversations WHERE id = ?1", params![conv_id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -357,6 +367,48 @@ impl Database {
         Ok(())
     }
 
+    // --- Bookmarks ---
+
+    pub fn save_bookmark(&self, bookmark: &BookmarkRecord) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO bookmarks (id, doc_id, node_id, label, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                bookmark.id,
+                bookmark.doc_id,
+                bookmark.node_id,
+                bookmark.label,
+                bookmark.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_bookmarks(&self, doc_id: &str) -> Result<Vec<BookmarkRecord>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, doc_id, node_id, label, created_at FROM bookmarks WHERE doc_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![doc_id], |row| {
+            Ok(BookmarkRecord {
+                id: row.get(0)?,
+                doc_id: row.get(1)?,
+                node_id: row.get(2)?,
+                label: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        let mut bookmarks = Vec::new();
+        for row in rows {
+            bookmarks.push(row?);
+        }
+        Ok(bookmarks)
+    }
+
+    pub fn delete_bookmark(&self, id: &str) -> Result<(), DbError> {
+        self.conn.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     // --- Cost summary ---
 
     pub fn get_cost_summary(&self) -> Result<Vec<CostSummaryRecord>, DbError> {
@@ -387,4 +439,13 @@ pub struct CostSummaryRecord {
     pub total_tokens: i64,
     pub total_cost: f64,
     pub query_count: i64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct BookmarkRecord {
+    pub id: String,
+    pub doc_id: String,
+    pub node_id: String,
+    pub label: String,
+    pub created_at: String,
 }

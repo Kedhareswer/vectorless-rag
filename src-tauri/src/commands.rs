@@ -238,6 +238,42 @@ pub fn get_cost_summary(db: State<Mutex<Database>>) -> Result<Vec<CostSummaryRec
     db.get_cost_summary().map_err(|e| e.to_string())
 }
 
+// --- Bookmark commands ---
+
+#[tauri::command]
+pub fn save_bookmark(
+    db: State<Mutex<Database>>,
+    doc_id: String,
+    node_id: String,
+    label: String,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let bookmark = crate::db::BookmarkRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        doc_id,
+        node_id,
+        label,
+        created_at: now,
+    };
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.save_bookmark(&bookmark).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_bookmarks(
+    db: State<Mutex<Database>>,
+    doc_id: String,
+) -> Result<Vec<crate::db::BookmarkRecord>, String> {
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.get_bookmarks(&doc_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_bookmark(db: State<Mutex<Database>>, id: String) -> Result<(), String> {
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.delete_bookmark(&id).map_err(|e| e.to_string())
+}
+
 // --- File dialog command ---
 
 #[tauri::command]
@@ -275,6 +311,9 @@ pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, S
 
 #[derive(serde::Serialize, Clone)]
 struct ExplorationStepStartEvent {
+    /// Correlation ID to match events to a specific chat request
+    #[serde(rename = "requestId")]
+    request_id: String,
     #[serde(rename = "stepNumber")]
     step_number: u32,
     tool: String,
@@ -284,6 +323,8 @@ struct ExplorationStepStartEvent {
 
 #[derive(serde::Serialize, Clone)]
 struct ExplorationStepCompleteEvent {
+    #[serde(rename = "requestId")]
+    request_id: String,
     #[serde(rename = "stepNumber")]
     step_number: u32,
     #[serde(rename = "outputSummary")]
@@ -299,12 +340,40 @@ struct ExplorationStepCompleteEvent {
 
 #[derive(serde::Serialize, Clone)]
 struct ChatResponseEvent {
+    #[serde(rename = "requestId")]
+    request_id: String,
     content: String,
 }
 
 #[derive(serde::Serialize, Clone)]
+struct ChatTokenEvent {
+    #[serde(rename = "requestId")]
+    request_id: String,
+    token: String,
+    done: bool,
+}
+
+#[derive(serde::Serialize, Clone)]
 struct ChatErrorEvent {
+    #[serde(rename = "requestId")]
+    request_id: String,
     error: String,
+}
+
+/// Emit a response token-by-token for streaming UX.
+/// Splits on word boundaries and emits each chunk with a small yield.
+async fn emit_streaming_response(app: &tauri::AppHandle, request_id: &str, content: &str) {
+    // Split into word-sized chunks for smoother streaming
+    let words: Vec<&str> = content.split_inclusive(|c: char| c.is_whitespace() || c == '\n')
+        .collect();
+
+    let chunk_size = 3; // Emit ~3 words at a time for natural flow
+    for chunk in words.chunks(chunk_size) {
+        let token: String = chunk.concat();
+        let _ = app.emit("chat-token", ChatTokenEvent { request_id: request_id.to_string(), token, done: false });
+        tokio::task::yield_now().await;
+    }
+    let _ = app.emit("chat-token", ChatTokenEvent { request_id: request_id.to_string(), token: String::new(), done: true });
 }
 
 fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, String> {
@@ -396,6 +465,9 @@ pub async fn chat_with_agent(
     doc_ids: Vec<String>,
     provider_id: String,
 ) -> Result<(), String> {
+    // Generate a unique request correlation ID
+    let request_id = uuid::Uuid::new_v4().to_string();
+
     // Support both single doc_id and multiple doc_ids
     if doc_ids.is_empty() {
         return Err("At least one document must be selected".to_string());
@@ -457,7 +529,8 @@ pub async fn chat_with_agent(
 
     let system_prompt = build_system_prompt(&overview_text, &exploration_hint);
     let tools = build_llm_tools(&provider_name);
-    let mut runtime = AgentRuntime::new(10);
+    let adaptive_max_steps = processed.recommended_max_steps;
+    let mut runtime = AgentRuntime::new(adaptive_max_steps);
 
     // Pre-search and pre-expand against the primary tree
     let mut pre_search_results = Vec::new();
@@ -523,7 +596,7 @@ pub async fn chat_with_agent(
         messages.push(Message::text("system", &context_parts.join("\n\n")));
     }
 
-    let max_steps = 10u32;
+    let max_steps = adaptive_max_steps;
     let mut total_tokens = 0u32;
     let mut tool_call_counter = 0u32;
     let mut nudge_counter = 0u32;
@@ -543,6 +616,7 @@ pub async fn chat_with_agent(
                 let _ = app.emit(
                     "chat-error",
                     ChatErrorEvent {
+                        request_id: request_id.clone(),
                         error: format!("LLM error: {}", e),
                     },
                 );
@@ -572,13 +646,19 @@ pub async fn chat_with_agent(
                 .content
                 .unwrap_or_else(|| "No response from agent.".to_string());
 
+            // Stream tokens for progressive UX
+            emit_streaming_response(&app, &request_id, &answer).await;
+
+            // Also emit full response for backwards compatibility
             let _ = app.emit(
                 "chat-response",
                 ChatResponseEvent {
+                    request_id: request_id.clone(),
                     content: answer.clone(),
                 },
             );
 
+            runtime.context.compute_relevance_scores();
             save_trace_data(&db, &doc_ids[0], &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
             return Ok(());
         }
@@ -620,6 +700,7 @@ pub async fn chat_with_agent(
             let _ = app.emit(
                 "exploration-step-start",
                 ExplorationStepStartEvent {
+                    request_id: request_id.clone(),
                     step_number: current_step,
                     tool: tool_call.name.clone(),
                     input_summary: input_summary.clone(),
@@ -675,6 +756,7 @@ pub async fn chat_with_agent(
             let _ = app.emit(
                 "exploration-step-complete",
                 ExplorationStepCompleteEvent {
+                    request_id: request_id.clone(),
                     step_number: current_step,
                     output_summary: output_summary.clone(),
                     tokens_used: llm_response.tokens_used,
@@ -702,6 +784,7 @@ pub async fn chat_with_agent(
             let _ = app.emit(
                 "chat-error",
                 ChatErrorEvent {
+                    request_id: request_id.clone(),
                     error: format!("LLM error on final synthesis: {}", e),
                 },
             );
@@ -715,11 +798,15 @@ pub async fn chat_with_agent(
         .content
         .unwrap_or_else(|| "The agent was unable to produce a final answer after exploring the document.".to_string());
 
+    // Stream tokens for progressive UX
+    emit_streaming_response(&app, &request_id, &answer).await;
+
     let _ = app.emit(
         "chat-response",
-        ChatResponseEvent { content: answer },
+        ChatResponseEvent { request_id: request_id.clone(), content: answer },
     );
 
+    runtime.context.compute_relevance_scores();
     save_trace_data(&db, &doc_ids[0], &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
 
     Ok(())

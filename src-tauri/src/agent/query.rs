@@ -25,6 +25,32 @@ pub struct ProcessedQuery {
     pub search_terms: Vec<String>,
     pub exploration_hint: String,
     pub min_tool_calls: u32,
+    /// Adaptive budget: recommended max_steps for this query
+    pub recommended_max_steps: u32,
+}
+
+/// Estimate query complexity from word count and search term diversity.
+fn estimate_complexity(query: &str, search_terms: &[String], intent: &QueryIntent) -> u32 {
+    let word_count = query.split_whitespace().count();
+    let term_count = search_terms.len();
+
+    // Base complexity from intent
+    let base = match intent {
+        QueryIntent::Summarize => 3,
+        QueryIntent::Comparison => 4,
+        QueryIntent::ListExtract => 3,
+        QueryIntent::Entity => 2,
+        QueryIntent::Factual => 2,
+        QueryIntent::Specific => 2,
+    };
+
+    // Boost for longer queries (more complex questions)
+    let length_boost = if word_count > 20 { 2 } else if word_count > 10 { 1 } else { 0 };
+
+    // Boost for many distinct search terms
+    let term_boost = if term_count > 4 { 2 } else if term_count > 2 { 1 } else { 0 };
+
+    base + length_boost + term_boost
 }
 
 /// Preprocess a user query: classify intent, extract search terms, generate hints.
@@ -41,12 +67,17 @@ pub fn preprocess_query(query: &str) -> ProcessedQuery {
         QueryIntent::Specific => 2,
     };
 
+    let complexity = estimate_complexity(query, &search_terms, &intent);
+    // Map complexity to max_steps: clamp between 6 and 15
+    let recommended_max_steps = (complexity * 2 + 4).min(15).max(6);
+
     ProcessedQuery {
         original: query.to_string(),
         intent,
         search_terms,
         exploration_hint,
         min_tool_calls,
+        recommended_max_steps,
     }
 }
 
