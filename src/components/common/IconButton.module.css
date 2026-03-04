@@ -1,0 +1,59 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.button:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.button:active {
+  transform: scale(0.95);
+}
+
+.button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.button:disabled:hover {
+  background: none;
+  color: var(--text-secondary);
+}
+
+/* Variants */
+
+.default {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-light);
+}
+
+.default:hover {
+  border-color: var(--border);
+  background-color: var(--bg-hover);
+}
+
+.ghost {
+  background: transparent;
+}
+
+/* Sizes */
+
+.sm {
+  width: 28px;
+  height: 28px;
+}
+
+.md {
+  width: 34px;
+  height: 34px;
+}

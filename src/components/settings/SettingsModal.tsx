@@ -20,7 +20,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type ProviderPreset = 'ollama' | 'groq' | 'google' | 'openrouter';
+type ProviderPreset = 'ollama' | 'groq' | 'google' | 'openrouter' | 'agentrouter';
 
 const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isActive'>> = {
   ollama: {
@@ -46,6 +46,12 @@ const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isAc
     apiKey: '',
     baseUrl: 'https://openrouter.ai/api/v1',
     model: 'anthropic/claude-sonnet-4',
+  },
+  agentrouter: {
+    name: 'agentrouter',
+    apiKey: '',
+    baseUrl: 'https://agentrouter.org/v1',
+    model: 'gpt-5',
   },
 };
 
@@ -74,6 +80,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   );
   const [isSaving, setIsSaving] = useState(false);
   const [localSteps, setLocalSteps] = useState(maxExplorationSteps);
+
+  // Cache API keys per provider type so switching types remembers previous keys
+  const [keyCache, setKeyCache] = useState<Record<string, string>>(() => {
+    const cache: Record<string, string> = {};
+    for (const p of savedProviders) {
+      if (p.apiKey) {
+        cache[p.name] = p.apiKey;
+      }
+    }
+    return cache;
+  });
 
   // Sync from store if it changes externally
   useEffect(() => {
@@ -110,7 +127,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
   const updateDraftProvider = (id: string, updates: Partial<ProviderConfig>) => {
     setDraftProviders((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updates } : p))
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        const updated = { ...p, ...updates };
+        // Keep key cache in sync when user types an API key
+        if (updates.apiKey !== undefined && updated.name !== 'ollama') {
+          setKeyCache((c) => ({ ...c, [updated.name]: updates.apiKey! }));
+        }
+        return updated;
+      })
     );
   };
 
@@ -126,11 +151,21 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
   const handlePresetChange = (id: string, preset: ProviderPreset) => {
     const presetData = PROVIDER_PRESETS[preset];
+    const currentProvider = draftProviders.find((p) => p.id === id);
+
+    // Save current provider's key to cache before switching
+    if (currentProvider && currentProvider.apiKey && currentProvider.name !== 'ollama') {
+      setKeyCache((prev) => ({ ...prev, [currentProvider.name]: currentProvider.apiKey }));
+    }
+
+    // Restore cached key for the new provider type, or empty
+    const cachedKey = preset === 'ollama' ? '' : (keyCache[preset] ?? '');
+
     updateDraftProvider(id, {
       name: presetData.name,
       baseUrl: presetData.baseUrl,
       model: presetData.model,
-      apiKey: preset === 'ollama' ? '' : draftProviders.find((p) => p.id === id)?.apiKey ?? '',
+      apiKey: cachedKey,
     });
   };
 
@@ -241,6 +276,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         <option value="groq">Groq</option>
                         <option value="google">Google AI Studio</option>
                         <option value="openrouter">OpenRouter</option>
+                        <option value="agentrouter">AgentRouter</option>
                       </select>
                     </div>
 

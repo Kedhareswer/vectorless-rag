@@ -55,6 +55,7 @@ export interface ProviderConfig {
 export interface TraceRecord {
   id: string;
   conv_id: string;
+  provider_name: string;
   total_tokens: number;
   total_cost: number;
   total_latency_ms: number;
@@ -70,6 +71,29 @@ export interface StepRecord {
   output_json: string;
   tokens_used: number;
   latency_ms: number;
+}
+
+export interface ConversationRecord {
+  id: string;
+  title: string;
+  doc_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageRecord {
+  id: string;
+  conv_id: string;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+export interface CostSummaryRecord {
+  provider_name: string;
+  total_tokens: number;
+  total_cost: number;
+  query_count: number;
 }
 
 // Document commands
@@ -92,9 +116,9 @@ export const deleteProvider = (id: string) => invoke<void>('delete_provider', { 
 export const getSetting = (key: string) => invoke<string | null>('get_setting', { key });
 export const setSetting = (key: string, value: string) => invoke<void>('set_setting', { key, value });
 
-// Chat
-export const chatWithAgent = (message: string, docId: string, providerId: string) =>
-  invoke<void>('chat_with_agent', { message, docId, providerId });
+// Chat — accepts array of doc IDs for multi-document queries
+export const chatWithAgent = (message: string, docIds: string[], providerId: string) =>
+  invoke<void>('chat_with_agent', { message, docIds, providerId });
 
 // File dialog
 export const openFileDialog = () => invoke<string | null>('open_file_dialog');
@@ -102,3 +126,13 @@ export const openFileDialog = () => invoke<string | null>('open_file_dialog');
 // Traces
 export const getTraces = (convId: string) => invoke<TraceRecord[]>('get_traces', { convId });
 export const getSteps = (msgId: string) => invoke<StepRecord[]>('get_steps', { msgId });
+export const getCostSummary = () => invoke<CostSummaryRecord[]>('get_cost_summary');
+
+// Conversations (Feature 1: Chat Persistence)
+export const listConversations = () => invoke<ConversationRecord[]>('list_conversations');
+export const saveConversationIPC = (id: string, title: string, docId: string | null) =>
+  invoke<void>('save_conversation', { id, title, docId });
+export const getConversationMessages = (convId: string) => invoke<MessageRecord[]>('get_conversation_messages', { convId });
+export const saveMessageIPC = (id: string, convId: string, role: string, content: string) =>
+  invoke<void>('save_message', { id, convId, role, content });
+export const deleteConversationIPC = (convId: string) => invoke<void>('delete_conversation', { convId });

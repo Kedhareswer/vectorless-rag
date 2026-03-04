@@ -3,6 +3,28 @@
   flex-direction: column;
   height: 100%;
   background-color: var(--bg-primary);
+  position: relative;
+}
+
+/* Drop overlay (drag-and-drop) */
+
+.dropOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background-color: rgba(222, 115, 86, 0.08);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 20;
+  pointer-events: none;
+  animation: fadeIn 150ms ease;
 }
 
 /* Messages area */
@@ -80,7 +102,6 @@
   border-radius: var(--radius-md);
   font-size: 14px;
   line-height: 1.6;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -88,6 +109,7 @@
   background-color: var(--bg-surface);
   color: var(--text-primary);
   border-bottom-right-radius: 2px;
+  white-space: pre-wrap;
 }
 
 .bubbleAssistant {
@@ -95,6 +117,107 @@
   color: var(--text-primary);
   border-bottom-left-radius: 2px;
   box-shadow: var(--shadow);
+}
+
+/* Markdown inside assistant bubbles */
+
+.bubbleAssistant p {
+  margin: 0 0 8px;
+}
+
+.bubbleAssistant p:last-child {
+  margin-bottom: 0;
+}
+
+.bubbleAssistant ul,
+.bubbleAssistant ol {
+  margin: 4px 0 8px;
+  padding-left: 20px;
+}
+
+.bubbleAssistant li {
+  margin-bottom: 2px;
+}
+
+.bubbleAssistant strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.bubbleAssistant em {
+  font-style: italic;
+}
+
+.bubbleAssistant code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background-color: var(--bg-surface);
+}
+
+.bubbleAssistant pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-primary);
+  overflow-x: auto;
+}
+
+.bubbleAssistant pre code {
+  padding: 0;
+  background: none;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.bubbleAssistant h1,
+.bubbleAssistant h2,
+.bubbleAssistant h3 {
+  margin: 12px 0 6px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.bubbleAssistant h1 { font-size: 16px; }
+.bubbleAssistant h2 { font-size: 15px; }
+.bubbleAssistant h3 { font-size: 14px; }
+
+.bubbleAssistant table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+  width: 100%;
+}
+
+.bubbleAssistant th,
+.bubbleAssistant td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.bubbleAssistant th {
+  background-color: var(--bg-surface);
+  font-weight: 600;
+}
+
+.bubbleAssistant blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--text-secondary);
+}
+
+.bubbleAssistant hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.bubbleAssistant a {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 /* Thinking steps */

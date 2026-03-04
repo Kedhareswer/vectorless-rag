@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
-import { Send, FileText, Compass, AlertCircle, Server } from 'lucide-react';
+import { useState, useRef, useEffect, Fragment } from 'react';
+import { Send, FileText, Compass, AlertCircle, Server, Upload } from 'lucide-react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import clsx from 'clsx';
 import { useChatStore, type ExplorationStep, type ChatMessage } from '../../stores/chat';
 import { useDocumentsStore } from '../../stores/documents';
@@ -10,16 +12,17 @@ import { ThinkingBlock } from './ThinkingBlock';
 import styles from './ChatPanel.module.css';
 
 interface ExplorationStepPayload {
-  step_number: number;
+  stepNumber: number;
   tool: string;
-  input_summary: string;
+  inputSummary: string;
 }
 
 interface ExplorationStepCompletePayload {
-  step_number: number;
-  output_summary: string;
-  tokens_used: number;
-  latency_ms: number;
+  stepNumber: number;
+  outputSummary: string;
+  tokensUsed: number;
+  latencyMs: number;
+  nodeIds: string[];
 }
 
 interface ChatResponsePayload {
@@ -33,6 +36,7 @@ interface ChatErrorPayload {
 export function ChatPanel() {
   const [input, setInput] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -49,77 +53,66 @@ export function ChatPanel() {
     clearSteps,
   } = useChatStore();
 
-  const { documents, activeDocumentId, setActiveDocument } = useDocumentsStore();
+  const { documents, activeDocumentId, selectedDocumentIds, setActiveDocument, ingestDocumentFromPath } = useDocumentsStore();
   const { providers, activeProviderId } = useSettingsStore();
 
   const activeProvider = providers.find((p) => p.id === activeProviderId);
 
   // Listen for Tauri events
+  // Store listener promises so cleanup can unlisten even if setup hasn't finished
   useEffect(() => {
-    const unlisteners: UnlistenFn[] = [];
+    const listenerPromises: Promise<UnlistenFn>[] = [];
 
-    const setupListeners = async () => {
-      try {
-        const unlistenStepStart = await listen<ExplorationStepPayload>(
-          'exploration-step-start',
-          (event) => {
-            const payload = event.payload;
-            const step: ExplorationStep = {
-              stepNumber: payload.step_number,
-              tool: payload.tool,
-              inputSummary: payload.input_summary,
-              outputSummary: '',
-              tokensUsed: 0,
-              latencyMs: 0,
-              status: 'running',
-            };
-            addExplorationStep(step);
-          }
-        );
-        unlisteners.push(unlistenStepStart);
+    try {
+      listenerPromises.push(
+        listen<ExplorationStepPayload>('exploration-step-start', (event) => {
+          const payload = event.payload;
+          const step: ExplorationStep = {
+            stepNumber: payload.stepNumber,
+            tool: payload.tool,
+            inputSummary: payload.inputSummary,
+            outputSummary: '',
+            tokensUsed: 0,
+            latencyMs: 0,
+            status: 'running',
+          };
+          addExplorationStep(step);
+        })
+      );
 
-        const unlistenStepComplete = await listen<ExplorationStepCompletePayload>(
-          'exploration-step-complete',
-          (event) => {
-            const payload = event.payload;
-            updateStepStatus(payload.step_number, 'complete', payload.output_summary);
-          }
-        );
-        unlisteners.push(unlistenStepComplete);
+      listenerPromises.push(
+        listen<ExplorationStepCompletePayload>('exploration-step-complete', (event) => {
+          const payload = event.payload;
+          updateStepStatus(payload.stepNumber, 'complete', payload.outputSummary, payload.nodeIds);
+        })
+      );
 
-        const unlistenResponse = await listen<ChatResponsePayload>(
-          'chat-response',
-          (event) => {
-            const msg: ChatMessage = {
-              id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-              role: 'assistant',
-              content: event.payload.content,
-              createdAt: new Date().toISOString(),
-            };
-            addMessage(msg);
-            setIsExploring(false);
-          }
-        );
-        unlisteners.push(unlistenResponse);
+      listenerPromises.push(
+        listen<ChatResponsePayload>('chat-response', (event) => {
+          const msg: ChatMessage = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+            role: 'assistant',
+            content: event.payload.content,
+            createdAt: new Date().toISOString(),
+          };
+          addMessage(msg);
+          setIsExploring(false);
+        })
+      );
 
-        const unlistenError = await listen<ChatErrorPayload>(
-          'chat-error',
-          (event) => {
-            setSendError(event.payload.error);
-            setIsExploring(false);
-          }
-        );
-        unlisteners.push(unlistenError);
-      } catch (err) {
-        // Tauri not available (running in browser) -- listeners fail silently
-        console.warn('Tauri event listeners not available:', err);
-      }
-    };
-
-    setupListeners();
+      listenerPromises.push(
+        listen<ChatErrorPayload>('chat-error', (event) => {
+          setSendError(event.payload.error);
+          setIsExploring(false);
+        })
+      );
+    } catch (err) {
+      console.warn('Tauri event listeners not available:', err);
+    }
 
     return () => {
-      unlisteners.forEach((unlisten) => unlisten());
+      // Each promise resolves to an unlisten function — call it when resolved
+      listenerPromises.forEach((p) => p.then((unlisten) => unlisten()).catch(() => {}));
     };
   }, [addExplorationStep, updateStepStatus, addMessage, setIsExploring]);
 
@@ -141,8 +134,13 @@ export function ChatPanel() {
     const trimmed = input.trim();
     if (!trimmed) return;
 
+    // Build doc IDs array for multi-document queries
+    const docIds = selectedDocumentIds.length > 0
+      ? selectedDocumentIds
+      : activeDocumentId ? [activeDocumentId] : [];
+
     // Validate prerequisites
-    if (!activeDocumentId) {
+    if (docIds.length === 0) {
       setSendError('Please select a document first.');
       return;
     }
@@ -178,7 +176,7 @@ export function ChatPanel() {
     clearSteps();
 
     try {
-      await chatWithAgent(trimmed, activeDocumentId, activeProviderId);
+      await chatWithAgent(trimmed, docIds, activeProviderId);
     } catch (err) {
       setSendError(String(err));
       setIsExploring(false);
@@ -192,12 +190,47 @@ export function ChatPanel() {
     }
   };
 
+  // Drag-and-drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      const file = files[0];
+      const filePath = (file as any).path || file.name;
+      if (filePath) {
+        await ingestDocumentFromPath(filePath);
+      }
+    }
+  };
+
   const hasContent = messages.length > 0 || explorationSteps.length > 0;
   const noProvider = providers.length === 0;
   const noDocument = documents.length === 0;
 
   return (
-    <div className={styles.panel}>
+    <div
+      className={styles.panel}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragOver && (
+        <div className={styles.dropOverlay}>
+          <Upload size={24} />
+          <span>Drop file to start exploring</span>
+        </div>
+      )}
       {/* Messages area */}
       <div className={styles.messages}>
         {!hasContent ? (
@@ -222,39 +255,57 @@ export function ChatPanel() {
           </div>
         ) : (
           <>
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={clsx(
-                  styles.message,
-                  msg.role === 'user' ? styles.messageUser : styles.messageAssistant
-                )}
-              >
-                <div
-                  className={clsx(
-                    styles.bubble,
-                    msg.role === 'user' ? styles.bubbleUser : styles.bubbleAssistant
+            {(() => {
+              // Find last user message index to insert steps after it
+              const lastUserIdx = messages.reduce(
+                (acc, msg, i) => (msg.role === 'user' ? i : acc),
+                -1,
+              );
+
+              return messages.map((msg, i) => (
+                <Fragment key={msg.id}>
+                  <div
+                    className={clsx(
+                      styles.message,
+                      msg.role === 'user' ? styles.messageUser : styles.messageAssistant
+                    )}
+                  >
+                    <div
+                      className={clsx(
+                        styles.bubble,
+                        msg.role === 'user' ? styles.bubbleUser : styles.bubbleAssistant
+                      )}
+                    >
+                      {msg.role === 'assistant' ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                      ) : (
+                        msg.content
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Show exploration steps right after the last user message */}
+                  {i === lastUserIdx && (
+                    <>
+                      {explorationSteps.map((step) => (
+                        <div key={step.stepNumber} className={styles.stepWrapper}>
+                          <ThinkingBlock step={step} />
+                        </div>
+                      ))}
+
+                      {isExploring && explorationSteps.length === 0 && (
+                        <div className={styles.stepWrapper}>
+                          <div className={styles.exploringIndicator}>
+                            <span className={styles.exploringDot} />
+                            <span>Exploring document...</span>
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
-                >
-                  {msg.content}
-                </div>
-              </div>
-            ))}
-
-            {explorationSteps.map((step) => (
-              <div key={step.stepNumber} className={styles.stepWrapper}>
-                <ThinkingBlock step={step} />
-              </div>
-            ))}
-
-            {isExploring && explorationSteps.length === 0 && (
-              <div className={styles.stepWrapper}>
-                <div className={styles.exploringIndicator}>
-                  <span className={styles.exploringDot} />
-                  <span>Exploring document...</span>
-                </div>
-              </div>
-            )}
+                </Fragment>
+              ));
+            })()}
           </>
         )}
 
@@ -278,6 +329,8 @@ export function ChatPanel() {
                 className={styles.docSelect}
                 value={activeDocumentId ?? ''}
                 onChange={(e) => setActiveDocument(e.target.value || null)}
+                aria-label="Select document"
+                title="Select document"
               >
                 <option value="">No document</option>
                 {documents.map((doc) => (

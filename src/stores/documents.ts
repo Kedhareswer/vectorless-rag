@@ -15,7 +15,6 @@ export interface DocumentSummary {
   createdAt: string;
 }
 
-// Convert from Tauri snake_case to frontend camelCase
 function fromTauriSummary(d: TauriDocumentSummary): DocumentSummary {
   return {
     id: d.id,
@@ -29,6 +28,8 @@ interface DocumentsState {
   documents: DocumentSummary[];
   activeDocumentId: string | null;
   activeTree: DocumentTree | null;
+  /** Multi-select: IDs of all selected documents (Feature 5) */
+  selectedDocumentIds: string[];
   isIngesting: boolean;
   isLoadingTree: boolean;
   error: string | null;
@@ -37,6 +38,8 @@ interface DocumentsState {
   addDocument: (document: DocumentSummary) => void;
   removeDocument: (id: string) => void;
   setActiveDocument: (id: string | null) => void;
+  /** Toggle selection of a document for multi-doc queries (Feature 5) */
+  toggleDocumentSelection: (id: string) => void;
   setIsIngesting: (ingesting: boolean) => void;
   loadDocuments: () => Promise<void>;
   ingestDocumentFromPath: (filePath: string) => Promise<void>;
@@ -49,6 +52,7 @@ export const useDocumentsStore = create<DocumentsState>((set) => ({
   documents: [],
   activeDocumentId: null,
   activeTree: null,
+  selectedDocumentIds: [],
   isIngesting: false,
   isLoadingTree: false,
   error: null,
@@ -68,11 +72,32 @@ export const useDocumentsStore = create<DocumentsState>((set) => ({
       documents: state.documents.filter((d) => d.id !== id),
       activeDocumentId: state.activeDocumentId === id ? null : state.activeDocumentId,
       activeTree: state.activeTree?.id === id ? null : state.activeTree,
+      selectedDocumentIds: state.selectedDocumentIds.filter((sid) => sid !== id),
     }));
   },
 
   setActiveDocument: (id: string | null) => {
-    set({ activeDocumentId: id, activeTree: null });
+    set({
+      activeDocumentId: id,
+      activeTree: null,
+      selectedDocumentIds: id ? [id] : [],
+    });
+  },
+
+  toggleDocumentSelection: (id: string) => {
+    set((state) => {
+      const isSelected = state.selectedDocumentIds.includes(id);
+      const newSelection = isSelected
+        ? state.selectedDocumentIds.filter((sid) => sid !== id)
+        : [...state.selectedDocumentIds, id];
+      // Keep activeDocumentId as the first in selection
+      const newActive = newSelection.length > 0 ? newSelection[0] : null;
+      return {
+        selectedDocumentIds: newSelection,
+        activeDocumentId: newActive,
+        activeTree: newActive !== state.activeDocumentId ? null : state.activeTree,
+      };
+    });
   },
 
   setIsIngesting: (ingesting: boolean) => {
@@ -104,6 +129,7 @@ export const useDocumentsStore = create<DocumentsState>((set) => ({
         documents: [...state.documents, summary],
         activeDocumentId: tree.id,
         activeTree: tree,
+        selectedDocumentIds: [tree.id],
         isIngesting: false,
       }));
     } catch (err) {
@@ -120,6 +146,7 @@ export const useDocumentsStore = create<DocumentsState>((set) => ({
         documents: state.documents.filter((d) => d.id !== id),
         activeDocumentId: state.activeDocumentId === id ? null : state.activeDocumentId,
         activeTree: state.activeTree?.id === id ? null : state.activeTree,
+        selectedDocumentIds: state.selectedDocumentIds.filter((sid) => sid !== id),
       }));
     } catch (err) {
       console.warn('Failed to delete document:', err);

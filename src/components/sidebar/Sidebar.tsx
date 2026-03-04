@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   FileText,
   MessageSquare,
@@ -8,6 +8,9 @@ import {
   PanelLeftOpen,
   Loader,
   Trash2,
+  Upload,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { IconButton } from '../common/IconButton';
@@ -24,29 +27,39 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState<SidebarTab>('documents');
   const [showSettings, setShowSettings] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   const {
     documents,
     activeDocumentId,
+    selectedDocumentIds,
     isIngesting,
     error: docError,
     setActiveDocument,
+    toggleDocumentSelection,
     loadDocuments,
     ingestDocumentFromPath,
     deleteDocumentFromBackend,
     loadActiveTree,
   } = useDocumentsStore();
 
-  const { conversations, activeConversationId, setActiveConversation, createConversation } =
-    useChatStore();
+  const {
+    conversations,
+    activeConversationId,
+    setActiveConversation,
+    createConversation,
+    loadConversations,
+    deleteConversation,
+  } = useChatStore();
 
   const { providers, loadProviders } = useSettingsStore();
 
-  // Load documents and providers on mount
+  // Load documents, providers, and conversations on mount
   useEffect(() => {
     loadDocuments();
     loadProviders();
-  }, [loadDocuments, loadProviders]);
+    loadConversations();
+  }, [loadDocuments, loadProviders, loadConversations]);
 
   // Load active tree when document selection changes
   useEffect(() => {
@@ -89,7 +102,58 @@ export function Sidebar() {
     await deleteDocumentFromBackend(id);
   };
 
+  const handleDeleteConversation = async (e: React.MouseEvent, convId: string) => {
+    e.stopPropagation();
+    await deleteConversation(convId);
+  };
+
+  // Feature 2: Drag-and-drop handlers
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    // In Tauri, files dragged from OS provide paths
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        // Tauri webview gives us the path property on File objects
+        const filePath = (file as unknown as { path?: string }).path ?? file.name;
+        if (filePath) {
+          try {
+            await ingestDocumentFromPath(filePath);
+          } catch (err) {
+            console.warn('Failed to ingest dropped file:', err);
+          }
+        }
+      }
+    }
+  }, [ingestDocumentFromPath]);
+
+  // Feature 5: Multi-select with Ctrl/Cmd+click
+  const handleDocClick = useCallback((e: React.MouseEvent, docId: string) => {
+    if (e.ctrlKey || e.metaKey) {
+      toggleDocumentSelection(docId);
+    } else {
+      setActiveDocument(docId);
+    }
+  }, [toggleDocumentSelection, setActiveDocument]);
+
   const activeProviderCount = providers.filter((p) => p.isActive).length;
+  const multiSelectActive = selectedDocumentIds.length > 1;
 
   return (
     <>
@@ -130,41 +194,69 @@ export function Sidebar() {
         {!collapsed && (
           <div className={styles.content}>
             {activeTab === 'documents' && (
-              <div className={styles.section}>
+              <div
+                className={clsx(styles.section, isDragOver && styles.dropActive)}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
                 <div className={styles.sectionHeader}>
                   <span className={styles.sectionTitle}>Documents</span>
+                  {multiSelectActive && (
+                    <span className={styles.multiSelectBadge}>
+                      {selectedDocumentIds.length} selected
+                    </span>
+                  )}
                 </div>
 
                 {docError && (
                   <p className={styles.errorText}>{docError}</p>
                 )}
 
+                {isDragOver && (
+                  <div className={styles.dropOverlay}>
+                    <Upload size={20} />
+                    <span>Drop files to ingest</span>
+                  </div>
+                )}
+
                 <div className={styles.list}>
                   {documents.length === 0 ? (
                     <p className={styles.emptyText}>No documents yet</p>
                   ) : (
-                    documents.map((doc) => (
-                      <button
-                        key={doc.id}
-                        className={clsx(
-                          styles.listItem,
-                          activeDocumentId === doc.id && styles.listItemActive
-                        )}
-                        onClick={() => setActiveDocument(doc.id)}
-                      >
-                        <FileText size={14} className={styles.listItemIcon} />
-                        <span className={styles.listItemName}>{doc.name}</span>
-                        <span className={styles.badge}>{doc.docType}</span>
+                    documents.map((doc) => {
+                      const isSelected = selectedDocumentIds.includes(doc.id);
+                      return (
                         <button
-                          className={styles.listItemDelete}
-                          onClick={(e) => handleDeleteDocument(e, doc.id)}
-                          title="Delete document"
-                          type="button"
+                          key={doc.id}
+                          className={clsx(
+                            styles.listItem,
+                            activeDocumentId === doc.id && styles.listItemActive,
+                            isSelected && multiSelectActive && styles.listItemSelected
+                          )}
+                          onClick={(e) => handleDocClick(e, doc.id)}
+                          title="Click to select. Ctrl+click for multi-select."
                         >
-                          <Trash2 size={12} />
+                          {multiSelectActive && (
+                            isSelected
+                              ? <CheckSquare size={14} className={styles.checkIcon} />
+                              : <Square size={14} className={styles.listItemIcon} />
+                          )}
+                          {!multiSelectActive && <FileText size={14} className={styles.listItemIcon} />}
+                          <span className={styles.listItemName}>{doc.name}</span>
+                          <span className={styles.badge}>{doc.docType}</span>
+                          <button
+                            className={styles.listItemDelete}
+                            onClick={(e) => handleDeleteDocument(e, doc.id)}
+                            title="Delete document"
+                            type="button"
+                          >
+                            <Trash2 size={12} />
+                          </button>
                         </button>
-                      </button>
-                    ))
+                      );
+                    })
                   )}
                 </div>
 
@@ -208,6 +300,14 @@ export function Sidebar() {
                       >
                         <MessageSquare size={14} className={styles.listItemIcon} />
                         <span className={styles.listItemName}>{conv.title}</span>
+                        <button
+                          className={styles.listItemDelete}
+                          onClick={(e) => handleDeleteConversation(e, conv.id)}
+                          title="Delete conversation"
+                          type="button"
+                        >
+                          <Trash2 size={12} />
+                        </button>
                       </button>
                     ))
                   )}

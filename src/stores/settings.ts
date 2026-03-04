@@ -8,7 +8,7 @@ import {
 
 export interface ProviderConfig {
   id: string;
-  name: string;      // "ollama" | "groq" | "google" | "openrouter"
+  name: string;      // "ollama" | "groq" | "google" | "openrouter" | "agentrouter"
   apiKey: string;     // API key (empty for ollama)
   baseUrl: string;    // Provider base URL
   model: string;      // Model name
@@ -29,12 +29,13 @@ function fromTauri(p: TauriProviderConfig): ProviderConfig {
 
 // Convert from frontend camelCase to Tauri snake_case
 function toTauri(p: ProviderConfig): TauriProviderConfig {
+  const trimmedKey = p.apiKey?.trim();
   return {
     id: p.id,
     name: p.name,
-    api_key: p.apiKey || null,
-    base_url: p.baseUrl,
-    model: p.model,
+    api_key: trimmedKey || null,
+    base_url: p.baseUrl.trim(),
+    model: p.model.trim(),
     is_active: p.isActive,
   };
 }
