@@ -294,10 +294,6 @@ export function CanvasView() {
     );
   }
 
-  // SVG viewBox: fixed large canvas, transform applied to inner <g>
-  const svgW = 10000;
-  const svgH = 10000;
-
   return (
     <div
       className={styles.container}
@@ -321,11 +317,10 @@ export function CanvasView() {
         <span className={styles.zoomLabel}>{Math.round(zoom * 100)}%</span>
       </div>
 
-      {/* Use a plain div canvas — CSS transform for zoom+pan */}
+      {/* SVG canvas — no viewBox so coordinates match pixel space for pan/zoom */}
       <div className={styles.svgWrapper}>
         <svg
           className={styles.svgCanvas}
-          viewBox={`0 0 ${svgW} ${svgH}`}
           onWheel={handleWheel}
         >
           {/* Single transform group — all zoom/pan lives here */}
