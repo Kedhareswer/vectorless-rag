@@ -85,6 +85,11 @@
   transition: color var(--transition-fast), background-color var(--transition-fast);
 }
 
+/* Prevent header button from growing vertically when direct child of column-flex section */
+.section > .sectionHeader {
+  flex: 0 0 auto;
+}
+
 .sectionHeader:hover {
   color: var(--text-primary);
   background-color: var(--bg-hover);

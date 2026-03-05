@@ -3,6 +3,7 @@ import { Send, Square, FileText, Compass, AlertCircle, Server, Upload } from 'lu
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import clsx from 'clsx';
 import { useChatStore, type ExplorationStep, type ChatMessage } from '../../stores/chat';
 import { useDocumentsStore } from '../../stores/documents';
@@ -22,6 +23,7 @@ interface ExplorationStepCompletePayload {
   outputSummary: string;
   tokensUsed: number;
   latencyMs: number;
+  cost: number;
   nodeIds: string[];
 }
 
@@ -74,6 +76,7 @@ export function ChatPanel() {
             outputSummary: '',
             tokensUsed: 0,
             latencyMs: 0,
+            cost: 0,
             status: 'running',
           };
           addExplorationStep(step);
@@ -83,7 +86,7 @@ export function ChatPanel() {
       listenerPromises.push(
         listen<ExplorationStepCompletePayload>('exploration-step-complete', (event) => {
           const payload = event.payload;
-          updateStepStatus(payload.stepNumber, 'complete', payload.outputSummary, payload.nodeIds, payload.tokensUsed, payload.latencyMs);
+          updateStepStatus(payload.stepNumber, 'complete', payload.outputSummary, payload.nodeIds, payload.tokensUsed, payload.latencyMs, payload.cost);
         })
       );
 
@@ -176,7 +179,7 @@ export function ChatPanel() {
     clearSteps();
 
     try {
-      await chatWithAgent(trimmed, docIds, activeProviderId);
+      await chatWithAgent(trimmed, docIds, activeProviderId, convId ?? undefined);
     } catch (err) {
       setSendError(String(err));
       setIsExploring(false);
@@ -277,7 +280,7 @@ export function ChatPanel() {
                       )}
                     >
                       {msg.role === 'assistant' ? (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{msg.content}</ReactMarkdown>
                       ) : (
                         msg.content
                       )}

@@ -99,7 +99,9 @@ impl Database {
                 total_cost REAL NOT NULL DEFAULT 0.0,
                 total_latency_ms INTEGER NOT NULL DEFAULT 0,
                 steps_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS evals (
@@ -134,6 +136,22 @@ impl Database {
             );
             ",
         )?;
+        // Migrations for existing databases
+        self.run_migrations()?;
+        Ok(())
+    }
+
+    fn run_migrations(&self) -> Result<(), DbError> {
+        // Add input_tokens/output_tokens columns to traces if missing
+        let has_input_tokens = self.conn
+            .prepare("SELECT input_tokens FROM traces LIMIT 0")
+            .is_ok();
+        if !has_input_tokens {
+            self.conn.execute_batch(
+                "ALTER TABLE traces ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE traces ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;"
+            )?;
+        }
         Ok(())
     }
 

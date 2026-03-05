@@ -30,7 +30,8 @@ type ProviderPreset =
   | 'openai'
   | 'deepseek'
   | 'xai'
-  | 'qwen';
+  | 'qwen'
+  | 'openai-compat';
 
 /** Models that have a fixed dropdown (provider -> model list) */
 const PROVIDER_MODELS: Partial<Record<ProviderPreset, string[]>> = {
@@ -132,6 +133,12 @@ const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isAc
     apiKey: '',
     baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
     model: 'qwen-turbo',
+  },
+  'openai-compat': {
+    name: 'openai-compat',
+    apiKey: '',
+    baseUrl: '',
+    model: '',
   },
 };
 
@@ -383,6 +390,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         </optgroup>
                         <optgroup label="Local">
                           <option value="ollama">Ollama (Local)</option>
+                        </optgroup>
+                        <optgroup label="Custom">
+                          <option value="openai-compat">OpenAI Compatible</option>
                         </optgroup>
                       </select>
                     </div>

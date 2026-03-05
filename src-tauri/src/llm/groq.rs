@@ -136,6 +136,8 @@ impl LLMProvider for GroqProvider {
             }
         }
 
+        let input_tokens = resp_json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = resp_json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
         let tokens_used = resp_json["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32;
 
         Ok(LLMResponse {
@@ -143,6 +145,8 @@ impl LLMProvider for GroqProvider {
             tool_calls,
             raw_tool_calls,
             tokens_used,
+            input_tokens,
+            output_tokens,
         })
     }
 

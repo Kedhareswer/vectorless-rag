@@ -6,8 +6,7 @@ import {
   Check,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { useChatStore, PROVIDER_COST_RATES } from '../../stores/chat';
-import { useSettingsStore } from '../../stores/settings';
+import { useChatStore } from '../../stores/chat';
 import type { ExplorationStep } from '../../stores/chat';
 import styles from './TraceView.module.css';
 
@@ -91,31 +90,40 @@ function StepItem({ step }: StepItemProps) {
   );
 }
 
+type ViewScope = 'query' | 'session';
+
 export function TraceView() {
   const explorationSteps = useChatStore((s) => s.explorationSteps);
-  const { providers, activeProviderId } = useSettingsStore();
-  const activeProvider = providers.find((p) => p.id === activeProviderId);
-  const providerName = activeProvider?.name.toLowerCase() ?? '';
+  const sessionTotals = useChatStore((s) => s.sessionTotals);
+  const sessionSteps = useChatStore((s) => s.sessionSteps);
+  const isLoadingSession = useChatStore((s) => s.isLoadingSession);
+  const [viewScope, setViewScope] = useState<ViewScope>('session');
 
-  const totals = useMemo(() => {
+  const queryTotals = useMemo(() => {
     let tokens = 0;
     let cost = 0;
     let latency = 0;
 
-    // Look up per-provider cost rate ($ per 1M tokens, blended)
-    const ratePerMillion = PROVIDER_COST_RATES[providerName] ?? 0.10;
-
     for (const step of explorationSteps) {
       tokens += step.tokensUsed;
       latency += step.latencyMs;
-      cost += (step.tokensUsed / 1_000_000) * ratePerMillion;
+      cost += step.cost;
     }
 
-    return { tokens, cost, latency, steps: explorationSteps.length, providerName };
-  }, [explorationSteps, providerName]);
+    return { tokens, cost, latency, steps: explorationSteps.length };
+  }, [explorationSteps]);
 
-  // Empty state — compact, no bloated placeholder
-  if (explorationSteps.length === 0) {
+  const displayTotals = viewScope === 'session'
+    ? {
+        tokens: sessionTotals.tokens + queryTotals.tokens,
+        cost: sessionTotals.cost + queryTotals.cost,
+        latency: sessionTotals.latency + queryTotals.latency,
+        steps: sessionTotals.steps + queryTotals.steps,
+      }
+    : queryTotals;
+
+  // Empty state — compact, no bloated placeholder (skip while loading)
+  if (explorationSteps.length === 0 && sessionTotals.steps === 0 && !isLoadingSession) {
     return (
       <div className={styles.container}>
         <div className={styles.header}>
@@ -146,34 +154,54 @@ export function TraceView() {
 
   return (
     <div className={styles.container}>
+      <div className={styles.scopeToggle}>
+        <button
+          type="button"
+          className={clsx(styles.scopeBtn, viewScope === 'query' && styles.scopeBtnActive)}
+          onClick={() => setViewScope('query')}
+        >
+          This query
+        </button>
+        <button
+          type="button"
+          className={clsx(styles.scopeBtn, viewScope === 'session' && styles.scopeBtnActive)}
+          onClick={() => setViewScope('session')}
+        >
+          Session
+        </button>
+      </div>
+
       <div className={styles.header}>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>Tokens</span>
           <span className={styles.statValue}>
-            {totals.tokens.toLocaleString()}
+            {displayTotals.tokens.toLocaleString()}
           </span>
         </div>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>Cost</span>
           <span className={styles.statValue}>
-            {formatCost(totals.cost)}
+            {formatCost(displayTotals.cost)}
           </span>
         </div>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>Latency</span>
           <span className={styles.statValue}>
-            {formatLatency(totals.latency)}
+            {formatLatency(displayTotals.latency)}
           </span>
         </div>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>Steps</span>
-          <span className={styles.statValue}>{totals.steps}</span>
+          <span className={styles.statValue}>{displayTotals.steps}</span>
         </div>
       </div>
 
       <div className={styles.timeline}>
+        {viewScope === 'session' && sessionSteps.map((step) => (
+          <StepItem key={`s-${step.stepNumber}`} step={step} />
+        ))}
         {explorationSteps.map((step) => (
-          <StepItem key={step.stepNumber} step={step} />
+          <StepItem key={`q-${step.stepNumber}`} step={step} />
         ))}
       </div>
     </div>

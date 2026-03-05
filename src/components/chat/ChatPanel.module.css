@@ -188,6 +188,8 @@
   margin: 8px 0;
   font-size: 13px;
   width: 100%;
+  display: block;
+  overflow-x: auto;
 }
 
 .bubbleAssistant th,
@@ -195,11 +197,13 @@
   border: 1px solid var(--border);
   padding: 6px 10px;
   text-align: left;
+  min-width: 80px;
 }
 
 .bubbleAssistant th {
   background-color: var(--bg-surface);
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .bubbleAssistant blockquote {

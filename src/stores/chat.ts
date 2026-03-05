@@ -5,7 +5,10 @@ import {
   saveConversationIPC,
   saveMessageIPC,
   deleteConversationIPC,
+  getTraces,
+  getSteps,
 } from '../lib/tauri';
+import { useDocumentsStore } from './documents';
 
 export interface Conversation {
   id: string;
@@ -28,24 +31,19 @@ export interface ExplorationStep {
   outputSummary: string;
   tokensUsed: number;
   latencyMs: number;
+  /** Cost in $ for this step, computed by the backend using per-model input/output rates */
+  cost: number;
   status: 'running' | 'complete';
   /** Node IDs visited by this step (Feature 4: Live Visualization) */
   nodeIds?: string[];
 }
 
-/** Per-provider cost rates ($ per 1M tokens, blended input+output) */
-export const PROVIDER_COST_RATES: Record<string, number> = {
-  groq: 0.10,
-  google: 0.0,
-  openrouter: 1.50,
-  agentrouter: 0.75,
-  ollama: 0.0,
-  anthropic: 9.00,
-  openai: 5.00,
-  deepseek: 0.35,
-  xai: 0.35,
-  qwen: 0.20,
-};
+export interface SessionTotals {
+  tokens: number;
+  cost: number;
+  latency: number;
+  steps: number;
+}
 
 interface ChatState {
   conversations: Conversation[];
@@ -57,17 +55,24 @@ interface ChatState {
   visitedNodeIds: string[];
   /** Currently active node being explored (Feature 4) */
   activeNodeId: string | null;
+  /** Cumulative session totals from previous queries in this conversation */
+  sessionTotals: SessionTotals;
+  /** Steps from previous queries loaded from DB (for session timeline view) */
+  sessionSteps: ExplorationStep[];
+  /** Whether session totals are being loaded from DB */
+  isLoadingSession: boolean;
 
   createConversation: (title: string, docId?: string) => string;
   setActiveConversation: (id: string | null) => void;
   addMessage: (message: ChatMessage) => void;
   addExplorationStep: (step: ExplorationStep) => void;
-  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[], tokensUsed?: number, latencyMs?: number) => void;
+  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[], tokensUsed?: number, latencyMs?: number, cost?: number) => void;
   setIsExploring: (exploring: boolean) => void;
   clearSteps: () => void;
   loadConversations: () => Promise<void>;
   loadMessages: (convId: string) => Promise<void>;
   deleteConversation: (convId: string) => Promise<void>;
+  loadSessionTotals: (convId: string) => Promise<void>;
 }
 
 function generateId(): string {
@@ -82,6 +87,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isExploring: false,
   visitedNodeIds: [],
   activeNodeId: null,
+  sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 },
+  sessionSteps: [],
+  isLoadingSession: false,
 
   createConversation: (title: string, docId?: string) => {
     const id = generateId();
@@ -98,6 +106,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       explorationSteps: [],
       visitedNodeIds: [],
       activeNodeId: null,
+      sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 },
+      sessionSteps: [],
     }));
     // Persist to backend (fire-and-forget)
     saveConversationIPC(id, title, docId ?? null).catch((err) =>
@@ -113,10 +123,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       explorationSteps: [],
       visitedNodeIds: [],
       activeNodeId: null,
+      sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 },
+      sessionSteps: [],
+      isLoadingSession: !!id,
     });
-    // If selecting an existing conversation, load its messages
+
+    // Restore document association from conversation
+    const conv = id ? get().conversations.find((c) => c.id === id) : null;
+    useDocumentsStore.getState().setActiveDocument(conv?.docId ?? null);
+
     if (id) {
       get().loadMessages(id);
+      get().loadSessionTotals(id);
     }
   },
 
@@ -140,7 +158,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
-  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[], tokensUsed?: number, latencyMs?: number) => {
+  updateStepStatus: (stepNumber: number, status: ExplorationStep['status'], outputSummary?: string, nodeIds?: string[], tokensUsed?: number, latencyMs?: number, cost?: number) => {
     set((state) => {
       const newVisited = nodeIds
         ? [...state.visitedNodeIds, ...nodeIds.filter((id) => !state.visitedNodeIds.includes(id))]
@@ -156,6 +174,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...(nodeIds ? { nodeIds } : {}),
                 ...(tokensUsed !== undefined ? { tokensUsed } : {}),
                 ...(latencyMs !== undefined ? { latencyMs } : {}),
+                ...(cost !== undefined ? { cost } : {}),
               }
             : step
         ),
@@ -173,7 +192,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearSteps: () => {
-    set({ explorationSteps: [], visitedNodeIds: [], activeNodeId: null });
+    // Accumulate current query totals and steps into session before clearing
+    const { explorationSteps, sessionTotals, sessionSteps } = get();
+    let queryTokens = 0;
+    let queryCost = 0;
+    let queryLatency = 0;
+    for (const step of explorationSteps) {
+      queryTokens += step.tokensUsed;
+      queryCost += step.cost;
+      queryLatency += step.latencyMs;
+    }
+    set({
+      explorationSteps: [],
+      visitedNodeIds: [],
+      activeNodeId: null,
+      sessionTotals: {
+        tokens: sessionTotals.tokens + queryTokens,
+        cost: sessionTotals.cost + queryCost,
+        latency: sessionTotals.latency + queryLatency,
+        steps: sessionTotals.steps + explorationSteps.length,
+      },
+      sessionSteps: [...sessionSteps, ...explorationSteps],
+    });
   },
 
   loadConversations: async () => {
@@ -214,11 +254,63 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((state) => ({
         conversations: state.conversations.filter((c) => c.id !== convId),
         ...(state.activeConversationId === convId
-          ? { activeConversationId: null, messages: [], explorationSteps: [], visitedNodeIds: [], activeNodeId: null }
+          ? { activeConversationId: null, messages: [], explorationSteps: [], visitedNodeIds: [], activeNodeId: null, sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 }, sessionSteps: [] }
           : {}),
       }));
     } catch (err) {
       console.warn('Failed to delete conversation:', err);
+    }
+  },
+
+  loadSessionTotals: async (convId: string) => {
+    try {
+      const traces = await getTraces(convId);
+      let tokens = 0;
+      let cost = 0;
+      let latency = 0;
+      let steps = 0;
+      for (const t of traces) {
+        tokens += t.total_tokens;
+        cost += t.total_cost;
+        latency += t.total_latency_ms;
+        steps += t.steps_count;
+      }
+
+      // Load historical steps from all traces
+      const allSteps: ExplorationStep[] = [];
+      let globalStepNum = 0;
+      // traces are DESC by created_at, reverse to get chronological order
+      for (const t of [...traces].reverse()) {
+        try {
+          const dbSteps = await getSteps(t.id);
+          for (const s of dbSteps) {
+            globalStepNum++;
+            allSteps.push({
+              stepNumber: globalStepNum,
+              tool: s.tool_name,
+              inputSummary: s.input_json,
+              outputSummary: s.output_json,
+              tokensUsed: s.tokens_used,
+              latencyMs: s.latency_ms,
+              cost: 0,
+              status: 'complete',
+            });
+          }
+        } catch {
+          // Skip traces whose steps fail to load
+        }
+      }
+
+      // Guard against stale results
+      if (get().activeConversationId !== convId) return;
+      set({
+        sessionTotals: { tokens, cost, latency, steps },
+        sessionSteps: allSteps,
+        isLoadingSession: false,
+      });
+    } catch (err) {
+      console.warn('Failed to load session totals:', err);
+      set({ isLoadingSession: false });
     }
   },
 }));

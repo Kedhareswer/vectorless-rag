@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Emitter, State};
+use serde::Deserialize;
 
 /// Shared cancellation flag — set to true to abort the running query.
 pub struct CancelFlag(pub Arc<AtomicBool>);
@@ -349,6 +350,8 @@ struct ExplorationStepCompleteEvent {
     tokens_used: u32,
     #[serde(rename = "latencyMs")]
     latency_ms: u64,
+    /// Estimated cost for this step ($ based on input/output token split)
+    cost: f64,
     /// Node IDs visited/accessed by this tool call (Feature 4: Live Visualization)
     #[serde(rename = "nodeIds")]
     node_ids: Vec<String>,
@@ -421,6 +424,11 @@ fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, Strin
             "Qwen",
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         ))),
+        "openai-compat" => Ok(Box::new(OpenAICompatProvider::new(
+            config,
+            "Custom",
+            "",
+        ))),
         _ => Err(format!("Unknown provider: {}", config.name)),
     }
 }
@@ -480,23 +488,33 @@ fn extract_node_ids(tool_name: &str, params: &HashMap<String, serde_json::Value>
     ids
 }
 
-/// Estimate cost for a provider given token count
-fn estimate_cost(provider_name: &str, total_tokens: u32) -> f64 {
-    // Approximate blended cost rates per 1M tokens (input+output averaged)
-    let rate_per_million = match provider_name {
-        "groq" => 0.10,
-        "google" => 0.0,       // Free tier
-        "openrouter" => 1.50,
-        "agentrouter" => 0.75,
-        "ollama" => 0.0,       // Local
-        "anthropic" => 9.00,   // Sonnet 4.6 blended ~$9/MTok
-        "openai" => 5.00,      // GPT-4o blended ~$5/MTok
-        "deepseek" => 0.35,    // deepseek-chat blended ~$0.35/MTok
-        "xai" => 0.35,         // grok-3-mini blended ~$0.35/MTok
-        "qwen" => 0.20,        // qwen-plus blended ~$0.20/MTok
-        _ => 0.50,
-    };
-    (total_tokens as f64 / 1_000_000.0) * rate_per_million
+/// Per-model pricing rates ($ per 1M tokens)
+#[derive(Deserialize, Clone, Debug)]
+struct ModelPricing {
+    input: f64,
+    output: f64,
+}
+
+/// Load the pricing table once from the embedded JSON.
+fn pricing_table() -> &'static HashMap<String, ModelPricing> {
+    static TABLE: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let json_str = include_str!("pricing.json");
+        serde_json::from_str(json_str).unwrap_or_default()
+    })
+}
+
+/// Estimate cost using per-model input/output rates from pricing.json.
+/// Falls back to _default rates if model is not found.
+fn estimate_cost(model_id: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+    let table = pricing_table();
+    let rates = table
+        .get(model_id)
+        .or_else(|| table.get("_default"))
+        .cloned()
+        .unwrap_or(ModelPricing { input: 0.50, output: 1.50 });
+    (input_tokens as f64 / 1_000_000.0) * rates.input
+        + (output_tokens as f64 / 1_000_000.0) * rates.output
 }
 
 #[tauri::command]
@@ -546,6 +564,7 @@ pub async fn chat_with_agent(
     let primary_tree = &trees[0];
 
     let provider_name = provider_config.name.to_lowercase();
+    let model_id = provider_config.model.clone();
     let provider = create_provider(provider_config)?;
 
     let processed = preprocess_query(&message);
@@ -627,10 +646,29 @@ pub async fn chat_with_agent(
     // Now create the real runtime with full budget for the agent
     let mut runtime = AgentRuntime::new(adaptive_max_steps);
 
+    // Load conversation history for multi-turn context
+    let mut history_messages: Vec<Message> = Vec::new();
+    if let Some(ref cid) = conv_id {
+        if let Ok(db_guard) = db.lock() {
+            if let Ok(records) = db_guard.get_conversation_messages(cid) {
+                // Skip the last message if it matches the current user message (just added by frontend)
+                let relevant: Vec<_> = records.iter()
+                    .filter(|r| !(r.role == "user" && r.content == message))
+                    .collect();
+                // Include recent history (limit to last 10 messages to avoid token bloat)
+                let start = if relevant.len() > 10 { relevant.len() - 10 } else { 0 };
+                for r in &relevant[start..] {
+                    history_messages.push(Message::text(&r.role, &r.content));
+                }
+            }
+        }
+    }
+
     let mut messages: Vec<Message> = vec![
         Message::text("system", &system_prompt),
-        Message::text("user", &message),
     ];
+    messages.extend(history_messages);
+    messages.push(Message::text("user", &message));
 
     if !pre_search_results.is_empty() || !pre_expand_results.is_empty() {
         let mut context_parts = Vec::new();
@@ -653,6 +691,8 @@ pub async fn chat_with_agent(
 
     let max_steps = adaptive_max_steps;
     let mut total_tokens = 0u32;
+    let mut total_input_tokens = 0u32;
+    let mut total_output_tokens = 0u32;
     let mut tool_call_counter = 0u32;
     let mut nudge_counter = 0u32;
     let max_nudges = 2u32;
@@ -705,6 +745,8 @@ pub async fn chat_with_agent(
         };
 
         total_tokens += llm_response.tokens_used;
+        total_input_tokens += llm_response.input_tokens;
+        total_output_tokens += llm_response.output_tokens;
 
         if llm_response.tool_calls.is_empty() {
             if tool_call_counter < min_tool_calls && _llm_turn < max_steps && nudge_counter < max_nudges {
@@ -724,7 +766,7 @@ pub async fn chat_with_agent(
 
             let answer = llm_response
                 .content
-                .unwrap_or_else(|| "No response from agent.".to_string());
+                .unwrap_or_else(|| "I explored the document but couldn't generate a response. Try rephrasing your question or asking about a different aspect of the document.".to_string());
 
             // Stream tokens for progressive UX
             emit_streaming_response(&app, &request_id, &answer).await;
@@ -740,7 +782,7 @@ pub async fn chat_with_agent(
 
             runtime.context.compute_relevance_scores();
             let trace_conv_id = conv_id.as_deref().unwrap_or(&doc_ids[0]);
-            save_trace_data(&db, trace_conv_id, &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
+            save_trace_data(&db, trace_conv_id, &model_id, &runtime, total_tokens, total_input_tokens, total_output_tokens, overall_start.elapsed().as_millis() as u64)?;
             return Ok(());
         }
 
@@ -754,7 +796,10 @@ pub async fn chat_with_agent(
         let llm_turn_ms = llm_turn_start.elapsed().as_millis() as u64;
         let turn_tool_count = llm_response.tool_calls.len() as u32;
         let tokens_per_tool = if turn_tool_count > 0 { llm_response.tokens_used / turn_tool_count } else { 0 };
+        let input_per_tool = if turn_tool_count > 0 { llm_response.input_tokens / turn_tool_count } else { 0 };
+        let output_per_tool = if turn_tool_count > 0 { llm_response.output_tokens / turn_tool_count } else { 0 };
         let latency_per_tool = if turn_tool_count > 0 { llm_turn_ms / turn_tool_count as u64 } else { 0 };
+        let cost_per_tool = estimate_cost(&model_id, input_per_tool, output_per_tool);
 
         for tool_call in &llm_response.tool_calls {
             let agent_tool = match AgentTool::from_name(&tool_call.name) {
@@ -851,6 +896,7 @@ pub async fn chat_with_agent(
                     output_summary: output_summary.clone(),
                     tokens_used: tokens_per_tool,
                     latency_ms: latency_per_tool + tool_exec_ms,
+                    cost: cost_per_tool,
                     node_ids,
                 },
             );
@@ -865,7 +911,7 @@ pub async fn chat_with_agent(
 
     messages.push(Message::text(
         "user",
-        "You have used all available exploration steps. Please synthesize your findings into a final answer based on what you have explored so far.",
+        "You have used all available exploration steps. Based on everything you explored, provide a clear and helpful answer to the user's original question. If the document does not contain the information the user asked about, say so explicitly and share whatever relevant information you did find. Never leave the user without a response.",
     ));
 
     let final_response = match provider.chat(messages, None).await {
@@ -883,10 +929,12 @@ pub async fn chat_with_agent(
     };
 
     total_tokens += final_response.tokens_used;
+    total_input_tokens += final_response.input_tokens;
+    total_output_tokens += final_response.output_tokens;
 
     let answer = final_response
         .content
-        .unwrap_or_else(|| "The agent was unable to produce a final answer after exploring the document.".to_string());
+        .unwrap_or_else(|| "I explored the document but couldn't find information relevant to your question. The document may not cover this topic — try rephrasing or asking about something within the document's scope.".to_string());
 
     // Stream tokens for progressive UX
     emit_streaming_response(&app, &request_id, &answer).await;
@@ -898,7 +946,7 @@ pub async fn chat_with_agent(
 
     runtime.context.compute_relevance_scores();
     let trace_conv_id = conv_id.as_deref().unwrap_or(&doc_ids[0]);
-    save_trace_data(&db, trace_conv_id, &provider_name, &runtime, total_tokens, overall_start.elapsed().as_millis() as u64)?;
+    save_trace_data(&db, trace_conv_id, &model_id, &runtime, total_tokens, total_input_tokens, total_output_tokens, overall_start.elapsed().as_millis() as u64)?;
 
     Ok(())
 }
@@ -906,9 +954,11 @@ pub async fn chat_with_agent(
 fn save_trace_data(
     db: &State<'_, Mutex<Database>>,
     conv_id: &str,
-    provider_name: &str,
+    model_id: &str,
     runtime: &AgentRuntime,
     total_tokens: u32,
+    input_tokens: u32,
+    output_tokens: u32,
     total_latency_ms: u64,
 ) -> Result<(), String> {
     let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
@@ -916,17 +966,19 @@ fn save_trace_data(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let cost = estimate_cost(provider_name, total_tokens);
+    let cost = estimate_cost(model_id, input_tokens, output_tokens);
 
     let trace = TraceRecord {
         id: trace_id.clone(),
         conv_id: conv_id.to_string(),
-        provider_name: provider_name.to_string(),
+        provider_name: model_id.to_string(),
         total_tokens: total_tokens as i64,
         total_cost: cost,
         total_latency_ms: total_latency_ms as i64,
         steps_count: runtime.steps.len() as i64,
         created_at: now,
+        input_tokens: input_tokens as i64,
+        output_tokens: output_tokens as i64,
     };
     db.save_trace(&trace).map_err(|e| e.to_string())?;
 

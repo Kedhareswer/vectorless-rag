@@ -61,6 +61,8 @@ export interface TraceRecord {
   total_latency_ms: number;
   steps_count: number;
   created_at: string;
+  input_tokens: number;
+  output_tokens: number;
 }
 
 export interface StepRecord {
@@ -117,8 +119,8 @@ export const getSetting = (key: string) => invoke<string | null>('get_setting', 
 export const setSetting = (key: string, value: string) => invoke<void>('set_setting', { key, value });
 
 // Chat — accepts array of doc IDs for multi-document queries
-export const chatWithAgent = (message: string, docIds: string[], providerId: string) =>
-  invoke<void>('chat_with_agent', { message, docIds, providerId });
+export const chatWithAgent = (message: string, docIds: string[], providerId: string, convId?: string) =>
+  invoke<void>('chat_with_agent', { message, docIds, providerId, convId });
 
 // Cancel any in-flight query
 export const abortQuery = () => invoke<void>('abort_query');

@@ -237,6 +237,12 @@ impl LLMProvider for GoogleProvider {
             }
         }
 
+        let input_tokens = resp_json["usageMetadata"]["promptTokenCount"]
+            .as_u64()
+            .unwrap_or(0) as u32;
+        let output_tokens = resp_json["usageMetadata"]["candidatesTokenCount"]
+            .as_u64()
+            .unwrap_or(0) as u32;
         let tokens_used = resp_json["usageMetadata"]["totalTokenCount"]
             .as_u64()
             .unwrap_or(0) as u32;
@@ -246,6 +252,8 @@ impl LLMProvider for GoogleProvider {
             tool_calls,
             raw_tool_calls,
             tokens_used,
+            input_tokens,
+            output_tokens,
         })
     }
 

@@ -13,6 +13,8 @@ pub struct TraceRecord {
     pub total_latency_ms: i64,
     pub steps_count: i64,
     pub created_at: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -38,8 +40,8 @@ pub struct EvalRecord {
 impl Database {
     pub fn save_trace(&self, trace: &TraceRecord) -> Result<(), DbError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO traces (id, conv_id, provider_name, total_tokens, total_cost, total_latency_ms, steps_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO traces (id, conv_id, provider_name, total_tokens, total_cost, total_latency_ms, steps_count, created_at, input_tokens, output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 trace.id,
                 trace.conv_id,
@@ -49,6 +51,8 @@ impl Database {
                 trace.total_latency_ms,
                 trace.steps_count,
                 trace.created_at,
+                trace.input_tokens,
+                trace.output_tokens,
             ],
         )?;
         Ok(())
@@ -56,7 +60,7 @@ impl Database {
 
     pub fn get_traces(&self, conv_id: &str) -> Result<Vec<TraceRecord>, DbError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, conv_id, COALESCE(provider_name, '') as provider_name, total_tokens, total_cost, total_latency_ms, steps_count, created_at
+            "SELECT id, conv_id, COALESCE(provider_name, '') as provider_name, total_tokens, total_cost, total_latency_ms, steps_count, created_at, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0)
              FROM traces WHERE conv_id = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![conv_id], |row| {
@@ -69,6 +73,8 @@ impl Database {
                 total_latency_ms: row.get(5)?,
                 steps_count: row.get(6)?,
                 created_at: row.get(7)?,
+                input_tokens: row.get(8)?,
+                output_tokens: row.get(9)?,
             })
         })?;
 

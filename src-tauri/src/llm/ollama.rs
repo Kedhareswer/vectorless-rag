@@ -115,14 +115,17 @@ impl LLMProvider for OllamaProvider {
             }
         }
 
-        let tokens_used = resp_json["eval_count"].as_u64().unwrap_or(0) as u32
-            + resp_json["prompt_eval_count"].as_u64().unwrap_or(0) as u32;
+        let input_tokens = resp_json["prompt_eval_count"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = resp_json["eval_count"].as_u64().unwrap_or(0) as u32;
+        let tokens_used = input_tokens + output_tokens;
 
         Ok(LLMResponse {
             content,
             tool_calls,
             raw_tool_calls,
             tokens_used,
+            input_tokens,
+            output_tokens,
         })
     }
 

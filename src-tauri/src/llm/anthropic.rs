@@ -220,6 +220,8 @@ impl LLMProvider for AnthropicProvider {
             tool_calls,
             raw_tool_calls,
             tokens_used,
+            input_tokens,
+            output_tokens,
         })
     }
 

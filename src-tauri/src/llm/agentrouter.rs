@@ -236,20 +236,17 @@ impl LLMProvider for AgentRouterProvider {
             }
         }
 
-        let tokens_used = resp_json["usage"]["input_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(
-                resp_json["usage"]["output_tokens"]
-                    .as_u64()
-                    .unwrap_or(0),
-            ) as u32;
+        let input_tokens = resp_json["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = resp_json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+        let tokens_used = input_tokens + output_tokens;
 
         Ok(LLMResponse {
             content: text_content,
             tool_calls,
             raw_tool_calls,
             tokens_used,
+            input_tokens,
+            output_tokens,
         })
     }
 

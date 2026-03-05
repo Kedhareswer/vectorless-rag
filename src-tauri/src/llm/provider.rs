@@ -88,6 +88,8 @@ pub struct LLMResponse {
     /// Raw JSON of tool_calls from the API response, for echoing back in conversation history.
     pub raw_tool_calls: Vec<serde_json::Value>,
     pub tokens_used: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]
