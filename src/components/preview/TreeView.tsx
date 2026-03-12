@@ -19,7 +19,7 @@ import { useDocumentsStore } from '../../stores/documents';
 import { useChatStore } from '../../stores/chat';
 import { getDocument } from '../../lib/tauri';
 import type { DocumentTree, TreeNode } from '../../lib/tauri';
-import sharedStyles from './PreviewPanel.module.css';
+import sharedStyles from './shared.module.css';
 import styles from './TreeView.module.css';
 
 /** Map node_type strings to lucide icons */

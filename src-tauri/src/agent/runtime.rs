@@ -1,19 +1,14 @@
+// NOTE: This file is SCAFFOLDING for a future ReAct agent loop.
+// It is NOT called by any live code path — the current pipeline uses
+// chat_handler.rs + deterministic.rs instead. Do not delete; planned for M5+.
+#![allow(dead_code)]
+
 use serde::Serialize;
 use std::collections::HashSet;
 use std::time::Instant;
 use thiserror::Error;
 
-/// Truncate a string at a UTF-8 safe char boundary.
-fn safe_truncate(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
+use crate::util::safe_truncate;
 
 use crate::document::tree::{DocumentTree, NodeType};
 use super::context::ExplorationContext;
@@ -21,18 +16,33 @@ use super::tools::{AgentTool, ToolInput, ToolOutput};
 
 /// Build the system prompt for the document exploration agent.
 /// Includes the document tree overview and query-specific exploration hints.
-pub fn build_system_prompt(tree_overview: &str, exploration_hint: &str) -> String {
+pub fn build_system_prompt(tree_overview: &str, exploration_hint: &str, doc_count: usize) -> String {
+    let multi_doc_rules = if doc_count > 1 {
+        format!(
+            "\n13. You have {n} documents loaded. You MUST explore ALL of them before answering — not just the first one.\n\
+             14. For summarize/overview queries, provide a separate summary for EACH document.\n\
+             15. Actively look for connections between documents and use record_relation to save them.",
+            n = doc_count
+        )
+    } else {
+        String::new()
+    };
+
+    let doc_label = if doc_count > 1 { "documents overview" } else { "document overview" };
+
     format!(
         r#"You are a document exploration agent. You navigate document trees to answer user questions with SPECIFIC, DETAILED information extracted from the actual document content.
 
 Available tools:
-- tree_overview(doc_id): See top-level structure of the document
+- tree_overview(doc_id): See top-level structure of a document
 - expand_node(node_id): Read the full content of a section and see its children
-- search_content(query, scope?): Search for specific text within the document
-- get_relations(node_id): See cross-references from a node
+- search_content(query, scope?): Search for specific text within a single document
+- search_across_docs(query, max_results?): Search ALL loaded documents at once — results grouped by document
+- get_relations(node_id): See cross-references and cross-document relations for a node
 - get_node_context(node_id): Understand where a node sits in the hierarchy
 - get_image(node_id): Retrieve image node information
-- compare_nodes(node_a, node_b): Compare two sections side by side
+- compare_nodes(node_a, node_b): Compare two sections side by side (works across documents)
+- record_relation(source_node_id, target_node_id, relation_type, description?): Record a discovered relationship between two nodes
 
 CRITICAL exploration rules — you MUST follow these:
 1. The tree overview only shows section TITLES and child counts — it does NOT contain the actual content.
@@ -43,10 +53,14 @@ CRITICAL exploration rules — you MUST follow these:
 6. For specific questions, use search_content to find relevant content, then expand matching nodes.
 7. If a section has many children, expand the most relevant children too.
 8. You may call multiple tools at once (parallel tool calls) for efficiency.
+9. When multiple documents are loaded, use search_across_docs to find information spanning all documents.
+10. When comparing across documents, use search_across_docs first to locate relevant sections, then compare_nodes to examine them side by side.
+11. When you discover meaningful relationships between nodes (shared entities, topic overlap, contradictions, or supporting evidence), use record_relation to persist them. Relation types: shared_entity, topic_overlap, contradiction, supports, references.
+12. Check get_relations for previously discovered cross-document relations that may inform your answer.{multi_doc_rules}
 
 {exploration_hint}
 
-Current document overview:
+Current {doc_label}:
 {tree_overview}
 
 IMPORTANT rules for your final answer:
@@ -56,6 +70,8 @@ IMPORTANT rules for your final answer:
 - Write in markdown format: use **bold**, - bullet points, ## headings, tables, and `code` as appropriate.
 - Do NOT include node IDs, UUIDs, or internal identifiers — reference sections by title.
 - When you have gathered enough information, provide your final answer (do not call any more tools)."#,
+        multi_doc_rules = multi_doc_rules,
+        doc_label = doc_label,
         tree_overview = tree_overview,
         exploration_hint = exploration_hint,
     )
@@ -234,6 +250,53 @@ impl AgentRuntime {
                     "node_b": node_b,
                 })
             }
+            AgentTool::SearchAcrossDocs => {
+                // Single-tree fallback: search this tree only.
+                // For full multi-doc search, use execute_multi_doc_tool instead.
+                let query = input
+                    .params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RuntimeError::MissingParam("query".to_string()))?
+                    .to_lowercase();
+
+                let max_results = input
+                    .params
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5) as usize;
+
+                let mut matches = Vec::new();
+                for (id, node) in &tree.nodes {
+                    if node.content.to_lowercase().contains(&query) {
+                        matches.push(serde_json::json!({
+                            "id": id,
+                            "node_type": node.node_type,
+                            "content_preview": if node.content.len() > 200 {
+                                format!("{}...", safe_truncate(&node.content, 200))
+                            } else {
+                                node.content.clone()
+                            },
+                        }));
+                        if matches.len() >= max_results {
+                            break;
+                        }
+                    }
+                }
+                serde_json::json!({
+                    "documents": [{
+                        "doc_name": tree.name,
+                        "doc_id": tree.id,
+                        "matches": matches,
+                        "match_count": matches.len(),
+                    }]
+                })
+            }
+            AgentTool::RecordRelation => {
+                // RecordRelation is handled in chat_handler.rs (needs DB access).
+                // This branch should never be reached.
+                serde_json::json!({ "error": "record_relation must be executed via chat_handler" })
+            }
             AgentTool::GetNodeContext => {
                 let node_id = input
                     .params
@@ -276,6 +339,99 @@ impl AgentRuntime {
         } else {
             self.context.record_step("_tool_call", &output_summary, 0);
         }
+
+        Ok(ToolOutput {
+            tool: input.tool.clone(),
+            result,
+            tokens_used: 0,
+            latency_ms,
+        })
+    }
+}
+
+impl AgentRuntime {
+    /// Execute a tool that operates across multiple document trees.
+    /// Currently handles SearchAcrossDocs; other tools fall back to single-tree execution.
+    pub fn execute_multi_doc_tool(
+        &mut self,
+        trees: &[DocumentTree],
+        input: &ToolInput,
+    ) -> Result<ToolOutput, RuntimeError> {
+        if !input.tool.is_multi_doc() || trees.len() <= 1 {
+            return self.execute_tool(&trees[0], input);
+        }
+
+        if self.context.budget_remaining() == 0 {
+            return Err(RuntimeError::BudgetExhausted);
+        }
+
+        let start = Instant::now();
+
+        let result = match input.tool {
+            AgentTool::SearchAcrossDocs => {
+                let query = input
+                    .params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RuntimeError::MissingParam("query".to_string()))?
+                    .to_lowercase();
+
+                let max_results = input
+                    .params
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5) as usize;
+
+                let mut doc_results = Vec::new();
+                for tree in trees {
+                    let mut matches = Vec::new();
+                    for (id, node) in &tree.nodes {
+                        if node.content.to_lowercase().contains(&query) {
+                            matches.push(serde_json::json!({
+                                "id": id,
+                                "node_type": node.node_type,
+                                "content_preview": if node.content.len() > 200 {
+                                    format!("{}...", safe_truncate(&node.content, 200))
+                                } else {
+                                    node.content.clone()
+                                },
+                            }));
+                            if matches.len() >= max_results {
+                                break;
+                            }
+                        }
+                    }
+                    doc_results.push(serde_json::json!({
+                        "doc_name": tree.name,
+                        "doc_id": tree.id,
+                        "matches": matches,
+                        "match_count": matches.len(),
+                    }));
+                }
+                serde_json::json!({ "documents": doc_results })
+            }
+            _ => return self.execute_tool(&trees[0], input),
+        };
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let output_preview = result.to_string();
+        let output_summary = if output_preview.len() > 100 {
+            format!("{}...", safe_truncate(&output_preview, 100))
+        } else {
+            output_preview
+        };
+
+        let step = ExplorationStep {
+            step_number: self.context.step_count + 1,
+            tool: format!("{:?}", input.tool),
+            input_summary: format!("{:?}", input.params),
+            output_summary: output_summary.clone(),
+            tokens_used: 0,
+            latency_ms,
+        };
+        self.steps.push(step);
+        self.context.record_step("_multi_doc_search", &output_summary, 0);
 
         Ok(ToolOutput {
             tool: input.tool.clone(),

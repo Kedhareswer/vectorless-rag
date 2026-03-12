@@ -22,12 +22,24 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
 thiserror = "2"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 async-trait = "0.1"
 pulldown-cmark = "0.12"
 pdf-extract = "0.7"
 calamine = "0.26"
 csv = "1"
 zip = "2"
+flate2 = "1"
+tar = "0.4"
 quick-xml = "0.37"
+keyring = { version = "3", features = ["sync-secret-service", "windows-native", "apple-native"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+lopdf = "0.39"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,5 +1,48 @@
 use serde::Serialize;
 
+use crate::llm::local;
+
+/// Result of a single local-model enrichment step.
+/// Tokens are always 0 — the local sidecar has no token counting.
+#[derive(Debug, Clone)]
+pub struct EnrichmentResult {
+    pub text: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Rewrite the user query into a clearer, search-optimized form using the local model.
+/// Returns Err if the local sidecar is not running (non-fatal — pipeline continues).
+pub fn rewrite_query(query: &str) -> Result<EnrichmentResult, String> {
+    let system = "Rewrite the query into concise search terms. Expand single words like 'summarize' into a full question. Output ONLY the rewritten query.";
+    let text = local::chat_inference(system, query, 80)?;
+    Ok(EnrichmentResult { text: text.trim().to_string(), input_tokens: 0, output_tokens: 0 })
+}
+
+/// Generate a hypothetical document passage that would answer the query (HyDE technique).
+/// The generated passage is used to extract richer search terms that match document language.
+/// Returns Err if the local sidecar is not running (non-fatal — pipeline continues).
+pub fn generate_hyde(query: &str) -> Result<EnrichmentResult, String> {
+    let system = "Write a short factual paragraph (2-3 sentences) a document would contain to answer this query. Use specific terminology. Output ONLY the paragraph.";
+    let text = local::chat_inference(system, query, 150)?;
+    Ok(EnrichmentResult { text: text.trim().to_string(), input_tokens: 0, output_tokens: 0 })
+}
+
+/// Generate a broader, more general version of the query (StepBack prompting technique).
+/// The broader question helps retrieve contextual information the specific query might miss.
+/// Returns Err if the local sidecar is not running (non-fatal — pipeline continues).
+pub fn stepback_query(query: &str) -> Result<EnrichmentResult, String> {
+    let system = "Generate a single broader question that provides background context for this query. Output ONLY the broader question.";
+    let text = local::chat_inference(system, query, 80)?;
+    Ok(EnrichmentResult { text: text.trim().to_string(), input_tokens: 0, output_tokens: 0 })
+}
+
+/// Extract search terms from arbitrary text. Public wrapper used by the enrichment pipeline
+/// to pull search terms from LLM-generated text (rewritten queries, HyDE passages, etc.).
+pub fn extract_terms_from_text(text: &str) -> Vec<String> {
+    extract_search_terms(text)
+}
+
 /// The classified intent of a user query.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub enum QueryIntent {
@@ -208,5 +251,148 @@ fn build_exploration_hint(intent: &QueryIntent, search_terms: &[String]) -> Stri
             "QUERY TYPE: Specific question — search for relevant keywords, then expand matching sections.{}",
             search_hint
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify_intent tests (via preprocess_query) ──────────────────
+
+    #[test]
+    fn intent_summarize() {
+        let pq = preprocess_query("summarize this document");
+        assert_eq!(pq.intent, QueryIntent::Summarize);
+    }
+
+    #[test]
+    fn intent_entity() {
+        let pq = preprocess_query("who is the author");
+        assert_eq!(pq.intent, QueryIntent::Entity);
+    }
+
+    #[test]
+    fn intent_comparison() {
+        let pq = preprocess_query("compare A vs B");
+        assert_eq!(pq.intent, QueryIntent::Comparison);
+    }
+
+    #[test]
+    fn intent_list_extract() {
+        let pq = preprocess_query("list all features");
+        assert_eq!(pq.intent, QueryIntent::ListExtract);
+    }
+
+    #[test]
+    fn intent_factual() {
+        let pq = preprocess_query("what is the main topic");
+        assert_eq!(pq.intent, QueryIntent::Factual);
+    }
+
+    #[test]
+    fn intent_specific() {
+        let pq = preprocess_query("specific technical term query");
+        assert_eq!(pq.intent, QueryIntent::Specific);
+    }
+
+    // ── extract_search_terms tests (via preprocess_query.search_terms) ─
+
+    #[test]
+    fn search_terms_removes_stop_words() {
+        let pq = preprocess_query("what is the main topic of this document");
+        // "what", "is", "the", "of", "this" are stop words
+        assert!(!pq.search_terms.contains(&"what".to_string()));
+        assert!(!pq.search_terms.contains(&"is".to_string()));
+        assert!(!pq.search_terms.contains(&"the".to_string()));
+        assert!(!pq.search_terms.contains(&"of".to_string()));
+        assert!(!pq.search_terms.contains(&"this".to_string()));
+    }
+
+    #[test]
+    fn search_terms_removes_short_words() {
+        let pq = preprocess_query("an ox is by me");
+        // "an", "ox", "is", "by", "me" — all <=2 chars or stop words
+        for term in &pq.search_terms {
+            assert!(term.len() > 2, "short word '{}' should have been removed", term);
+        }
+    }
+
+    #[test]
+    fn search_terms_lowercased() {
+        let pq = preprocess_query("Rust Async Runtime Architecture");
+        for term in &pq.search_terms {
+            assert_eq!(
+                term,
+                &term.to_lowercase(),
+                "term '{}' should be lowercased",
+                term
+            );
+        }
+    }
+
+    // ── preprocess_query integration tests ────────────────────────────
+
+    #[test]
+    fn recommended_max_steps_in_range() {
+        let queries = [
+            "summarize this document",
+            "who is the author",
+            "compare A vs B",
+            "list all features",
+            "what is the main topic",
+            "specific technical term query",
+        ];
+        for q in &queries {
+            let pq = preprocess_query(q);
+            assert!(
+                pq.recommended_max_steps >= 6 && pq.recommended_max_steps <= 15,
+                "query '{}' has recommended_max_steps={}, expected 6..=15",
+                q,
+                pq.recommended_max_steps
+            );
+        }
+    }
+
+    #[test]
+    fn min_tool_calls_matches_intent() {
+        // Summarize and ListExtract typically need more tool calls than Factual/Specific
+        let summarize = preprocess_query("summarize this document");
+        let factual = preprocess_query("what is the main topic");
+        assert!(
+            summarize.min_tool_calls >= factual.min_tool_calls,
+            "Summarize min_tool_calls ({}) should be >= Factual ({})",
+            summarize.min_tool_calls,
+            factual.min_tool_calls
+        );
+
+        let comparison = preprocess_query("compare A vs B");
+        assert!(
+            comparison.min_tool_calls >= factual.min_tool_calls,
+            "Comparison min_tool_calls ({}) should be >= Factual ({})",
+            comparison.min_tool_calls,
+            factual.min_tool_calls
+        );
+    }
+
+    #[test]
+    fn exploration_hint_contains_query_type() {
+        let queries = [
+            "summarize this document",
+            "who is the author",
+            "compare A vs B",
+            "list all features",
+            "what is the main topic",
+            "specific technical term query",
+        ];
+        for q in &queries {
+            let pq = preprocess_query(q);
+            assert!(
+                pq.exploration_hint.contains("QUERY TYPE:"),
+                "exploration_hint for '{}' should contain 'QUERY TYPE:', got: {}",
+                q,
+                pq.exploration_hint
+            );
+        }
     }
 }

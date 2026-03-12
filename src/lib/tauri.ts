@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 
 // Types matching Rust structs
 
@@ -34,6 +34,16 @@ export interface TreeNodeSummary {
   node_type: string;
   content_preview: string;
   children_count: number;
+}
+
+export interface RichNodeSummary {
+  id: string;
+  node_type: string;
+  content_preview: string;
+  children_count: number;
+  summary: string | null;
+  entities: string[];
+  topics: string[];
 }
 
 export interface DocumentSummary {
@@ -106,6 +116,7 @@ export const deleteDocument = (id: string) => invoke<void>('delete_document', { 
 
 // Tree commands
 export const getTreeOverview = (docId: string) => invoke<TreeNodeSummary[]>('get_tree_overview', { docId });
+export const getRichOverview = (docId: string) => invoke<RichNodeSummary[]>('get_rich_overview', { docId });
 export const expandNode = (docId: string, nodeId: string) => invoke<TreeNode>('expand_node', { docId, nodeId });
 export const searchDocument = (docId: string, query: string) => invoke<TreeNode[]>('search_document', { docId, query });
 
@@ -118,9 +129,27 @@ export const deleteProvider = (id: string) => invoke<void>('delete_provider', { 
 export const getSetting = (key: string) => invoke<string | null>('get_setting', { key });
 export const setSetting = (key: string, value: string) => invoke<void>('set_setting', { key, value });
 
+// Chat event types sent via Tauri Channel
+export type ChatEvent =
+  | { type: 'step-start'; stepNumber: number; tool: string; inputSummary: string }
+  | { type: 'step-complete'; stepNumber: number; outputSummary: string; tokensUsed: number; latencyMs: number; cost: number; nodeIds: string[] }
+  | { type: 'token'; token: string; done: boolean }
+  | { type: 'response'; content: string }
+  | { type: 'error'; error: string };
+
 // Chat — accepts array of doc IDs for multi-document queries
-export const chatWithAgent = (message: string, docIds: string[], providerId: string, convId?: string) =>
-  invoke<void>('chat_with_agent', { message, docIds, providerId, convId });
+// Uses Tauri Channel for real-time streaming events instead of global event listeners.
+export const chatWithAgent = (
+  message: string,
+  docIds: string[],
+  providerId: string,
+  onEvent: (event: ChatEvent) => void,
+  convId?: string,
+) => {
+  const channel = new Channel<ChatEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>('chat_with_agent', { message, docIds, providerId, convId, onEvent: channel });
+};
 
 // Cancel any in-flight query
 export const abortQuery = () => invoke<void>('abort_query');
@@ -142,6 +171,73 @@ export const saveMessageIPC = (id: string, convId: string, role: string, content
   invoke<void>('save_message', { id, convId, role, content });
 export const deleteConversationIPC = (convId: string) => invoke<void>('delete_conversation', { convId });
 
+// Conversation-Document associations (documents scoped per chat)
+export const addDocToConversation = (convId: string, docId: string) =>
+  invoke<void>('add_doc_to_conversation', { convId, docId });
+export const removeDocFromConversation = (convId: string, docId: string) =>
+  invoke<void>('remove_doc_from_conversation', { convId, docId });
+export const getConversationDocIds = (convId: string) =>
+  invoke<string[]>('get_conversation_doc_ids', { convId });
+
+// Local model management
+export interface ModelOption {
+  id: string;
+  name: string;
+  description: string;
+  size_bytes: number;
+  size_label: string;
+  url: string;
+  filename: string;
+  sha256: string | null;
+}
+
+export interface LocalModelStatus {
+  downloaded: boolean;
+  model_id: string | null;
+  model_path: string | null;
+  size_bytes: number | null;
+  /** Whether the llama-server binary is also available and ready to run. */
+  binary_ready: boolean;
+}
+
+export interface DownloadProgress {
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+  done: boolean;
+  error: string | null;
+  /** Human-readable label for the current download phase (e.g. "Downloading llama-server binary...") */
+  phase: string;
+}
+
+export const getModelOptions = () => invoke<ModelOption[]>('get_model_options');
+export const checkLocalModel = () => invoke<LocalModelStatus>('check_local_model');
+export const downloadLocalModel = (
+  modelId: string,
+  onProgress: (progress: DownloadProgress) => void,
+) => {
+  const channel = new Channel<DownloadProgress>();
+  channel.onmessage = onProgress;
+  return invoke<void>('download_local_model', { modelId, onProgress: channel });
+};
+export const deleteLocalModel = () => invoke<void>('delete_local_model');
+
+// Cross-doc relations
+export interface CrossDocRelation {
+  id: string;
+  source_doc_id: string;
+  source_node_id: string;
+  target_doc_id: string;
+  target_node_id: string;
+  relation_type: string;
+  confidence: number;
+  description: string | null;
+  created_at: string;
+}
+
+export const getCrossDocRelations = (docIds: string[]) =>
+  invoke<CrossDocRelation[]>('get_cross_doc_relations', { docIds });
+
 // Bookmarks
 export interface BookmarkRecord {
   id: string;
@@ -155,3 +251,16 @@ export const saveBookmark = (docId: string, nodeId: string, label: string) =>
   invoke<void>('save_bookmark', { docId, nodeId, label });
 export const getBookmarks = (docId: string) => invoke<BookmarkRecord[]>('get_bookmarks', { docId });
 export const deleteBookmark = (id: string) => invoke<void>('delete_bookmark', { id });
+
+// Image description
+/** Ask the active vision-capable provider to describe an extracted image node.
+ *  Returns the description string and persists it to the document tree. */
+export const describeImage = (docId: string, nodeId: string, imagePath: string) =>
+  invoke<string>('describe_image', { docId, nodeId, imagePath });
+
+// Re-enrich an already-ingested document with the local model (or heuristics if no model).
+export const reenrichDocument = (docId: string) =>
+  invoke<void>('reenrich_document', { docId });
+
+// Clear ALL app data (DB, model file, keychain). Frontend must reload after this.
+export const clearAppData = () => invoke<void>('clear_app_data');

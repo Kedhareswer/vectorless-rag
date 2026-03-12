@@ -29,6 +29,7 @@ export function ThinkingBlock({ step }: ThinkingBlockProps) {
       <button
         className={styles.completeHeader}
         onClick={() => setExpanded(!expanded)}
+        type="button"
       >
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <Wrench size={14} className={styles.toolIcon} />

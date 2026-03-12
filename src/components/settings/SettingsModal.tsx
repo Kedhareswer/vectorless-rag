@@ -10,10 +10,14 @@ import {
   Server,
   Palette,
   SlidersHorizontal,
+  Cpu,
+  TriangleAlert,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useSettingsStore, type ProviderConfig } from '../../stores/settings';
 import { useThemeStore } from '../../stores/theme';
+import { ModelDownloadDialog } from '../common/ModelDownloadDialog';
+import { clearAppData } from '../../lib/tauri';
 import styles from './SettingsModal.module.css';
 
 interface SettingsModalProps {
@@ -167,6 +171,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   );
   const [isSaving, setIsSaving] = useState(false);
   const [localSteps, setLocalSteps] = useState(maxExplorationSteps);
+  const [showModelDialog, setShowModelDialog] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [clearConfirm, setClearConfirm] = useState(false);
 
   // Cache API keys per provider type so switching types remembers previous keys
   const [keyCache, setKeyCache] = useState<Record<string, string>>(() => {
@@ -305,6 +312,24 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
+  const handleClearData = async () => {
+    if (!clearConfirm) {
+      setClearConfirm(true);
+      return;
+    }
+    setIsClearing(true);
+    try {
+      await clearAppData();
+      // Reload the window — backend DB is gone, frontend state must reset
+      window.location.reload();
+    } catch (err) {
+      console.error('Failed to clear app data:', err);
+    } finally {
+      setIsClearing(false);
+      setClearConfirm(false);
+    }
+  };
+
   return (
     <div
       ref={overlayRef}
@@ -367,10 +392,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
                   <div className={styles.fieldGrid}>
                     <div className={clsx(styles.field, styles.fieldFull)}>
-                      <label className={styles.fieldLabel}>Provider Type</label>
+                      <label className={styles.fieldLabel} htmlFor={`provider-type-${provider.id}`}>Provider Type</label>
                       <select
+                        id={`provider-type-${provider.id}`}
                         className={styles.fieldSelect}
                         value={provider.name}
+                        title="Select provider type"
                         onChange={(e) =>
                           handlePresetChange(provider.id, e.target.value as ProviderPreset)
                         }
@@ -465,7 +492,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                           )}
                           onClick={() => setDraftActive(provider.id)}
                           aria-label={provider.isActive ? 'Active provider' : 'Set as active provider'}
-                          aria-pressed={provider.isActive ? "true" : "false"}
+                          aria-pressed={provider.isActive}
                         />
                       </div>
                     </div>
@@ -528,6 +555,25 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             </div>
           </div>
 
+          {/* Local Model Section */}
+          <div className={styles.section}>
+            <div className={styles.sectionTitle}>
+              <Cpu size={14} className={styles.sectionIcon} />
+              <span>Document Enrichment Model</span>
+            </div>
+            <p className={styles.sectionDesc}>
+              A small local AI model that generates summaries and metadata for document sections.
+            </p>
+            <button
+              type="button"
+              className={styles.addProviderButton}
+              onClick={() => setShowModelDialog(true)}
+            >
+              <Cpu size={16} />
+              <span>Manage Local Model</span>
+            </button>
+          </div>
+
           {/* Exploration Section */}
           <div className={styles.section}>
             <div className={styles.sectionTitle}>
@@ -547,10 +593,39 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   max={20}
                   value={localSteps}
                   onChange={(e) => setLocalSteps(Number(e.target.value))}
+                  aria-label="Max exploration steps"
+                  title="Max exploration steps"
                 />
                 <span className={styles.sliderValue}>{localSteps}</span>
               </div>
             </div>
+          </div>
+
+          {/* Danger Zone */}
+          <div className={styles.section}>
+            <div className={styles.sectionTitle}>
+              <TriangleAlert size={14} className={styles.sectionIcon} style={{ color: 'var(--accent)' }} />
+              <span>Danger Zone</span>
+            </div>
+            <p className={styles.sectionDesc}>
+              Deletes all conversations, documents, providers, and the local model.
+              The app returns to a clean first-run state. This cannot be undone.
+            </p>
+            <button
+              type="button"
+              className={styles.dangerButton}
+              onClick={handleClearData}
+              disabled={isClearing}
+            >
+              <Trash2 size={14} />
+              <span>
+                {isClearing
+                  ? 'Clearing...'
+                  : clearConfirm
+                  ? 'Click again to confirm — this is irreversible'
+                  : 'Clear All App Data'}
+              </span>
+            </button>
           </div>
         </div>
 
@@ -573,6 +648,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </button>
         </div>
       </div>
+
+      {showModelDialog && (
+        <ModelDownloadDialog onClose={() => setShowModelDialog(false)} />
+      )}
     </div>
   );
 }

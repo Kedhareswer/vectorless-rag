@@ -1,4 +1,6 @@
 pub mod provider;
+pub mod retry;
+pub mod local;
 pub mod groq;
 pub mod google;
 pub mod openrouter;
@@ -14,4 +16,5 @@ pub use google::GoogleProvider;
 pub use openrouter::OpenRouterProvider;
 pub use agentrouter::AgentRouterProvider;
 pub use anthropic::AnthropicProvider;
+pub use retry::RetryProvider;
 pub use openai_compat::OpenAICompatProvider;

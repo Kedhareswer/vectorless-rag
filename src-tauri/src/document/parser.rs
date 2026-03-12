@@ -216,6 +216,28 @@ impl DocumentParser for CodeParser {
 
 pub struct PdfParser;
 
+/// Common document section keywords that are almost always headings.
+/// Matched case-insensitively against standalone lines.
+const SECTION_KEYWORDS: &[&str] = &[
+    // Academic / report
+    "abstract", "introduction", "background", "methodology", "methods",
+    "results", "discussion", "conclusion", "conclusions", "references",
+    "bibliography", "acknowledgements", "acknowledgments", "appendix",
+    "literature review", "related work", "future work",
+    // CV / resume
+    "education", "experience", "work experience", "professional experience",
+    "skills", "technical skills", "projects", "certifications", "certificates",
+    "achievements", "awards", "publications", "languages", "interests",
+    "hobbies", "objective", "summary", "profile", "contact", "contact information",
+    "personal information", "personal details", "qualifications",
+    // Legal / business
+    "overview", "scope", "definitions", "terms and conditions",
+    "responsibilities", "requirements", "deliverables", "timeline",
+    "budget", "risk assessment", "recommendations", "executive summary",
+    // General
+    "table of contents", "glossary", "index", "preface", "foreword",
+];
+
 /// Heuristic: detect if a line looks like a heading.
 /// Returns Some(level) if it looks like a heading, None otherwise.
 fn detect_heading(line: &str) -> Option<u32> {
@@ -223,15 +245,46 @@ fn detect_heading(line: &str) -> Option<u32> {
     if trimmed.is_empty() || trimmed.len() > 120 {
         return None;
     }
-    // Numbered headings: "1.", "1.1", "Chapter 1", "Section 2.3"
-    let lower = trimmed.to_lowercase();
-    if lower.starts_with("chapter ") {
-        return Some(1);
+    // Reject lines that are clearly sentences (end with period, comma, etc.)
+    if trimmed.ends_with('.') || trimmed.ends_with(',') || trimmed.ends_with(';') {
+        // Exception: abbreviations like "Ph.D." or "U.S." in short lines
+        if trimmed.len() > 40 {
+            return None;
+        }
     }
-    if lower.starts_with("section ") {
+
+    let lower = trimmed.to_lowercase();
+
+    // 1. Exact keyword match — strongest signal
+    if SECTION_KEYWORDS.contains(&lower.as_str()) {
         return Some(2);
     }
-    // ALL CAPS short line (likely a heading)
+    // Also match "keyword:" variants (e.g., "Skills:" "Education:")
+    let lower_no_colon = lower.trim_end_matches(':').trim();
+    if SECTION_KEYWORDS.contains(&lower_no_colon) {
+        return Some(2);
+    }
+
+    // 2. Explicit numbered heading patterns: "Chapter 1", "Part II", "Section 2.3"
+    if lower.starts_with("chapter ") || lower.starts_with("part ") {
+        return Some(1);
+    }
+    if lower.starts_with("section ") || lower.starts_with("appendix ") {
+        return Some(2);
+    }
+
+    // 3. Numbered headings: "1. Introduction", "2.3 Methods", "1.2.1 Overview"
+    let re_numbered = trimmed.split_whitespace().next().unwrap_or("");
+    if !re_numbered.is_empty() {
+        let stripped = re_numbered.trim_end_matches('.');
+        let is_numbered = stripped.split('.').all(|s| s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty());
+        if is_numbered && trimmed.len() <= 80 {
+            let depth = stripped.matches('.').count();
+            return Some((depth as u32 + 1).min(4));
+        }
+    }
+
+    // 4. ALL CAPS short line (likely a heading)
     if trimmed.len() <= 80
         && trimmed.len() >= 3
         && trimmed.chars().all(|c| c.is_uppercase() || c.is_whitespace() || c.is_ascii_punctuation() || c.is_ascii_digit())
@@ -239,15 +292,174 @@ fn detect_heading(line: &str) -> Option<u32> {
     {
         return Some(2);
     }
-    // Short line (< 60 chars) ending without period — often a heading
-    if trimmed.len() <= 60 && !trimmed.ends_with('.') && !trimmed.ends_with(',') && !trimmed.contains("  ") {
-        // Must have at least one letter, and first char is uppercase or digit
+
+    // 5. Short title-case line (< 60 chars) without sentence endings
+    if trimmed.len() <= 60
+        && !trimmed.ends_with('.')
+        && !trimmed.ends_with(',')
+        && !trimmed.ends_with(';')
+    {
         let first = trimmed.chars().next().unwrap_or(' ');
-        if (first.is_uppercase() || first.is_ascii_digit()) && trimmed.chars().any(|c| c.is_alphabetic()) {
+        if (first.is_uppercase() || first.is_ascii_digit())
+            && trimmed.chars().any(|c| c.is_alphabetic())
+            // Must not look like a regular sentence (has few words)
+            && trimmed.split_whitespace().count() <= 5
+        {
             return Some(3);
         }
     }
     None
+}
+
+/// Detect whether a line contains fused section keywords (no space between keyword and
+/// the following content) and split it into separate lines.
+/// Handles BOTH start-of-line fusions and mid-line fusions, recursively.
+/// e.g. "EducationLovely Professional University…" → ["Education", "Lovely Professional University…"]
+/// e.g. "some textSkillsPython, Rust" → ["some text", "Skills", "Python, Rust"]
+fn split_fused_heading(line: &str) -> Vec<String> {
+    if line.is_empty() {
+        return vec![line.to_string()];
+    }
+    let lower = line.to_lowercase();
+
+    // Find the earliest fused keyword match anywhere in the line.
+    // A "fused" match means: keyword appears case-insensitively, the char before it
+    // (if any) is NOT a space, OR the char after it is uppercase/digit with no space.
+    let mut best_match: Option<(usize, usize)> = None; // (byte_offset, keyword_len)
+
+    for kw in SECTION_KEYWORDS {
+        if kw.len() < 3 {
+            continue;
+        }
+        // Search for all occurrences of this keyword in the line
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find(kw) {
+            let abs_pos = search_from + pos;
+            let kw_end = abs_pos + kw.len();
+
+            if kw_end >= line.len() {
+                // Keyword at end of line with nothing after — check if fused from left
+                if abs_pos > 0 {
+                    let prev_char = line[..abs_pos].chars().last().unwrap_or(' ');
+                    if prev_char != ' ' && prev_char != '\n' {
+                        if best_match.is_none() || abs_pos < best_match.unwrap().0 {
+                            best_match = Some((abs_pos, kw.len()));
+                        }
+                    }
+                }
+                break;
+            }
+
+            let next_char = line[kw_end..].chars().next().unwrap_or(' ');
+            let is_fused_right = next_char != ' ' && (next_char.is_uppercase() || next_char.is_ascii_digit());
+            let is_fused_left = abs_pos > 0 && {
+                let prev_char = line[..abs_pos].chars().last().unwrap_or(' ');
+                prev_char != ' ' && prev_char != '\n'
+            };
+
+            // It's a fused keyword if content runs into it from either side
+            if is_fused_right || is_fused_left {
+                if best_match.is_none() || abs_pos < best_match.unwrap().0 {
+                    best_match = Some((abs_pos, kw.len()));
+                }
+            }
+
+            search_from = abs_pos + 1;
+        }
+    }
+
+    match best_match {
+        None => vec![line.to_string()],
+        Some((pos, kw_len)) => {
+            let mut parts = Vec::new();
+            // Text before the keyword
+            let before = line[..pos].trim();
+            if !before.is_empty() {
+                parts.push(before.to_string());
+            }
+            // The keyword itself
+            let keyword = &line[pos..pos + kw_len];
+            parts.push(keyword.to_string());
+            // Recursively split the rest (may contain more fused keywords)
+            let rest = line[pos + kw_len..].trim();
+            if !rest.is_empty() {
+                parts.extend(split_fused_heading(rest));
+            }
+            parts
+        }
+    }
+}
+
+/// Detect when a line starts with a known section keyword followed by content.
+/// PDF extractors often merge heading text with the first line of body text on the same line.
+/// e.g. "Education Lovely Professional University..." → ["Education", "Lovely Professional University..."]
+/// Only splits when the remaining content is substantial (>15 chars) and starts with an
+/// uppercase letter or digit, to avoid false positives like "Skills Overview" or "Summary of".
+fn split_leading_keyword(line: &str) -> Vec<String> {
+    if line.len() < 15 {
+        return vec![line.to_string()];
+    }
+    let lower = line.to_lowercase();
+
+    // Sort keywords longest-first to prefer "work experience" over "experience"
+    let mut sorted_kws: Vec<&str> = SECTION_KEYWORDS.to_vec();
+    sorted_kws.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    for kw in &sorted_kws {
+        if !lower.starts_with(kw) {
+            continue;
+        }
+        let kw_end = kw.len();
+        if kw_end >= line.len() {
+            continue; // keyword IS the whole line — leave it for detect_heading
+        }
+
+        let next_char = line[kw_end..].chars().next().unwrap_or(' ');
+
+        // Keyword followed by space or colon
+        if next_char == ' ' || next_char == ':' {
+            let skip = if next_char == ':' {
+                // "Skills: Python..." → skip colon + any whitespace
+                1 + line[kw_end + 1..].len() - line[kw_end + 1..].trim_start().len()
+            } else {
+                1 // skip the space
+            };
+            if kw_end + skip >= line.len() {
+                continue;
+            }
+            let rest = line[kw_end + skip..].trim();
+
+            // Only split if rest is substantial and starts with uppercase/digit
+            if rest.len() > 15
+                && rest
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_uppercase() || c.is_ascii_digit())
+            {
+                return vec![line[..kw_end].to_string(), rest.to_string()];
+            }
+        }
+    }
+
+    vec![line.to_string()]
+}
+
+/// Flush accumulated paragraph text into the tree as a Paragraph node.
+fn flush_paragraph(
+    tree: &mut DocumentTree,
+    parent_id: &str,
+    buffer: &mut String,
+    page_num: usize,
+) {
+    let trimmed = buffer.trim();
+    if !trimmed.is_empty() {
+        let mut node = TreeNode::new(NodeType::Paragraph, trimmed.to_string());
+        node.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
+        let wc = trimmed.split_whitespace().count();
+        node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
+        let _ = tree.add_node(parent_id, node);
+    }
+    buffer.clear();
 }
 
 impl DocumentParser for PdfParser {
@@ -261,7 +473,6 @@ impl DocumentParser for PdfParser {
         let root_id = tree.root_id.clone();
 
         // Store total page estimate in root metadata
-        // pdf_extract joins pages with form-feed; count them for approximate page count
         let page_count = text.matches('\u{000C}').count().max(1);
         if let Some(root) = tree.nodes.get_mut(&root_id) {
             root.metadata.insert("page_count".to_string(), serde_json::json!(page_count));
@@ -285,33 +496,64 @@ impl DocumentParser for PdfParser {
             vec![&text]
         };
 
+        let use_page_sections = pages.len() > 1;
+
+        // section_stack tracks heading nesting: (level, node_id)
         let mut section_stack: Vec<(u32, String)> = vec![(0, root_id.clone())];
         let mut current_parent = root_id.clone();
-        let mut para_index = 0u32;
+        let mut para_buffer = String::new();
 
         for (page_idx, page_text) in pages.iter().enumerate() {
             let page_num = page_idx + 1;
 
-            let paras: Vec<&str> = page_text
-                .split("\n\n")
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .collect();
+            // Create a page-level section node for multi-page PDFs
+            if use_page_sections {
+                // Flush any leftover paragraph from previous page
+                flush_paragraph(&mut tree, &current_parent, &mut para_buffer, page_num.saturating_sub(1));
 
-            for para in &paras {
-                let first_line = para.lines().next().unwrap_or(para).trim();
+                let mut page_node = TreeNode::new(
+                    NodeType::Section,
+                    format!("Page {}", page_num),
+                );
+                page_node.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
+                page_node.metadata.insert("is_page_section".to_string(), serde_json::json!(true));
+                let page_node_id = page_node.id.clone();
+                let _ = tree.add_node(&root_id, page_node);
+                section_stack = vec![(0, page_node_id.clone())];
+                current_parent = page_node_id;
+            }
 
-                // Check if this paragraph starts with a heading-like line
-                if let Some(level) = detect_heading(first_line) {
-                    let title = {
-                        let t = first_line;
-                        if t.len() > 80 {
-                            let mut end = 80;
-                            while end > 0 && !t.is_char_boundary(end) { end -= 1; }
-                            format!("{}...", &t[..end])
-                        } else {
-                            t.to_string()
-                        }
+            // Process line-by-line instead of splitting on \n\n.
+            // This catches headings that pdf-extract separates with only single newlines.
+            for raw_line in page_text.lines() {
+                // Two-pass split for PDF artefacts:
+                // 1. split_fused_heading: "EducationLovely Prof..." → ["Education", "Lovely Prof..."]
+                // 2. split_leading_keyword: "Education Lovely Prof..." → ["Education", "Lovely Prof..."]
+                let fused_parts = split_fused_heading(raw_line.trim());
+                let mut all_parts: Vec<String> = Vec::new();
+                for part in &fused_parts {
+                    all_parts.extend(split_leading_keyword(part.trim()));
+                }
+                for split_line in &all_parts {
+                let trimmed = split_line.trim();
+
+                // Blank line: flush accumulated paragraph
+                if trimmed.is_empty() {
+                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, page_num);
+                    continue;
+                }
+
+                // Check if this line is a heading
+                if let Some(level) = detect_heading(trimmed) {
+                    // Flush any accumulated paragraph content before the heading
+                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, page_num);
+
+                    let title = if trimmed.len() > 80 {
+                        let mut end = 80;
+                        while end > 0 && !trimmed.is_char_boundary(end) { end -= 1; }
+                        format!("{}...", &trimmed[..end])
+                    } else {
+                        trimmed.to_string()
                     };
 
                     // Pop stack to correct nesting level
@@ -330,28 +572,19 @@ impl DocumentParser for PdfParser {
                     let _ = tree.add_node(&parent, section);
                     section_stack.push((level, section_id.clone()));
                     current_parent = section_id;
-
-                    // If the paragraph has more lines beyond the heading, add them as content
-                    let rest: String = para.lines().skip(1).collect::<Vec<_>>().join("\n");
-                    let rest = rest.trim();
-                    if !rest.is_empty() {
-                        let mut node = TreeNode::new(NodeType::Paragraph, rest.to_string());
-                        node.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
-                        let wc = rest.split_whitespace().count();
-                        node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
-                        let _ = tree.add_node(&current_parent, node);
-                    }
                 } else {
-                    let mut node = TreeNode::new(NodeType::Paragraph, para.to_string());
-                    node.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
-                    let wc = para.split_whitespace().count();
-                    node.metadata.insert("word_count".to_string(), serde_json::json!(wc));
-                    node.metadata.insert("para_index".to_string(), serde_json::json!(para_index));
-                    let _ = tree.add_node(&current_parent, node);
+                    // Accumulate into current paragraph
+                    if !para_buffer.is_empty() {
+                        para_buffer.push('\n');
+                    }
+                    para_buffer.push_str(trimmed);
                 }
-                para_index += 1;
-            }
+            } // end split_line
+        } // end split_lines
         }
+
+        // Flush any remaining paragraph
+        flush_paragraph(&mut tree, &current_parent, &mut para_buffer, pages.len());
 
         Ok(tree)
     }
@@ -381,6 +614,16 @@ impl DocumentParser for DocxParser {
         let mut tree = DocumentTree::new(file_name, DocType::Word);
         let root_id = tree.root_id.clone();
         parse_docx_xml(&xml_content, &mut tree, &root_id);
+
+        // Extract embedded images and add as Image nodes
+        let images = super::image::extract_images_from_docx(file_path, &tree.id);
+        for img in images {
+            let mut node = TreeNode::new(NodeType::Image, img.path.clone());
+            node.raw_image_path = Some(img.path);
+            node.metadata.insert("mime_type".to_string(), serde_json::json!(img.mime_type));
+            let _ = tree.add_node(&root_id, node);
+        }
+
         Ok(tree)
     }
 }
@@ -478,14 +721,7 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
                     if !row_cells.is_empty() {
                         if let Some(ref tid) = table_id.clone() {
                             let row_node = TreeNode::new(NodeType::TableRow, row_cells.join(" | "));
-                            let row_id = row_node.id.clone();
                             let _ = tree.add_node(tid, row_node);
-                            for val in &row_cells {
-                                if !val.is_empty() {
-                                    let cell = TreeNode::new(NodeType::TableCell, val.clone());
-                                    let _ = tree.add_node(&row_id, cell);
-                                }
-                            }
                         }
                     }
                     row_cells.clear();
@@ -537,7 +773,9 @@ impl DocumentParser for CsvParser {
             }
         }
 
-        let summary = format!("{} rows × {} columns", rows.len(), headers.len());
+        let total_rows = rows.len();
+        let col_count = headers.len();
+        let summary = format!("{} rows × {} columns", total_rows, col_count);
         let mut tree = DocumentTree::new(file_name.clone(), DocType::Csv);
         let root_id = tree.root_id.clone();
 
@@ -545,26 +783,54 @@ impl DocumentParser for CsvParser {
             root.content = format!("{} — {}", file_name, summary);
         }
 
-        let table = TreeNode::new(NodeType::Table, summary);
+        // Build a schema description: column names + sample values from first 3 rows
+        let schema_lines: Vec<String> = headers.iter().enumerate().map(|(i, col)| {
+            let samples: Vec<&str> = rows.iter().take(3)
+                .filter_map(|r| r.get(i).map(|s| s.as_str()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            if samples.is_empty() {
+                col.clone()
+            } else {
+                format!("{} (e.g. {})", col, samples.join(", "))
+            }
+        }).collect();
+        let schema = format!(
+            "Columns: {}\nSchema:\n{}",
+            headers.join(", "),
+            schema_lines.join("\n")
+        );
+
+        let mut table = TreeNode::new(NodeType::Table, summary.clone());
+        // Store columns and schema on the table node for retrieval
+        table.metadata.insert("columns".to_string(), serde_json::json!(headers));
+        table.metadata.insert("total_rows".to_string(), serde_json::json!(total_rows));
+        table.metadata.insert("schema".to_string(), serde_json::json!(schema.clone()));
+        // Use schema as the table's summary so fetch_summarize uses it instead of raw rows
+        table.summary = Some(format!("{}\n{}", summary, schema));
         let table_id = table.id.clone();
         let _ = tree.add_node(&root_id, table);
 
         // Header row
-        let hrow = TreeNode::new(NodeType::TableRow, headers.join(" | "));
-        let hrow_id = hrow.id.clone();
+        let mut hrow = TreeNode::new(NodeType::TableRow, headers.join(" | "));
+        hrow.metadata.insert("is_header".to_string(), serde_json::json!(true));
         let _ = tree.add_node(&table_id, hrow);
-        for h in &headers {
-            let _ = tree.add_node(&hrow_id, TreeNode::new(NodeType::TableCell, h.clone()));
-        }
 
-        // Data rows
-        for row in &rows {
-            let rnode = TreeNode::new(NodeType::TableRow, row.join(" | "));
-            let rid = rnode.id.clone();
+        // Data rows — store as "ColName: value | ColName: value" so the LLM always
+        // knows which column each value belongs to, even when a single row is fetched.
+        for (idx, row) in rows.iter().enumerate() {
+            let keyed: Vec<String> = headers.iter().zip(row.iter())
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(col, val)| format!("{}: {}", col, val))
+                .collect();
+            let content = if keyed.is_empty() {
+                row.join(" | ")
+            } else {
+                keyed.join(" | ")
+            };
+            let mut rnode = TreeNode::new(NodeType::TableRow, content);
+            rnode.metadata.insert("row_index".to_string(), serde_json::json!(idx));
             let _ = tree.add_node(&table_id, rnode);
-            for val in row {
-                let _ = tree.add_node(&rid, TreeNode::new(NodeType::TableCell, val.clone()));
-            }
         }
 
         Ok(tree)
@@ -600,13 +866,14 @@ impl DocumentParser for XlsxParser {
             let section_id = section.id.clone();
             let _ = tree.add_node(&root_id, section);
 
-            let table = TreeNode::new(NodeType::Table, label);
+            let mut table = TreeNode::new(NodeType::Table, label);
             let table_id = table.id.clone();
-            let _ = tree.add_node(&section_id, table);
 
+            // First pass: collect headers and data rows
+            let mut headers: Vec<String> = Vec::new();
+            let mut data_rows: Vec<Vec<String>> = Vec::new();
             for (idx, row) in range.rows().enumerate() {
                 if idx >= 500 { break; }
-
                 let cells: Vec<String> = row.iter().map(|c| match c {
                     Data::Empty => String::new(),
                     Data::String(s) => s.clone(),
@@ -618,15 +885,49 @@ impl DocumentParser for XlsxParser {
                     Data::DurationIso(s) => s.clone(),
                     Data::Error(e) => format!("#ERR:{:?}", e),
                 }).collect();
-
-                let rnode = TreeNode::new(NodeType::TableRow, cells.join(" | "));
-                let rid = rnode.id.clone();
-                let _ = tree.add_node(&table_id, rnode);
-                for val in &cells {
-                    if !val.is_empty() {
-                        let _ = tree.add_node(&rid, TreeNode::new(NodeType::TableCell, val.clone()));
-                    }
+                if idx == 0 {
+                    headers = cells;
+                } else {
+                    data_rows.push(cells);
                 }
+            }
+
+            // Build schema summary with sample values
+            let schema_lines: Vec<String> = headers.iter().enumerate().map(|(i, col)| {
+                let samples: Vec<&str> = data_rows.iter().take(3)
+                    .filter_map(|r| r.get(i).map(|s| s.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if samples.is_empty() { col.clone() } else {
+                    format!("{} (e.g. {})", col, samples.join(", "))
+                }
+            }).collect();
+            let schema = format!(
+                "Columns: {}\nSchema:\n{}",
+                headers.join(", "),
+                schema_lines.join("\n")
+            );
+            table.metadata.insert("columns".to_string(), serde_json::json!(headers));
+            table.metadata.insert("total_rows".to_string(), serde_json::json!(data_rows.len()));
+            table.metadata.insert("schema".to_string(), serde_json::json!(schema.clone()));
+            table.summary = Some(format!("{} rows × {} cols\n{}", data_rows.len(), headers.len(), schema));
+            let _ = tree.add_node(&section_id, table);
+
+            // Header row node
+            let mut hrow = TreeNode::new(NodeType::TableRow, headers.join(" | "));
+            hrow.metadata.insert("is_header".to_string(), serde_json::json!(true));
+            let _ = tree.add_node(&table_id, hrow);
+
+            // Data rows with column-keyed content
+            for (idx, row) in data_rows.iter().enumerate() {
+                let keyed: Vec<String> = headers.iter().zip(row.iter())
+                    .filter(|(_, v)| !v.is_empty())
+                    .map(|(col, val)| format!("{}: {}", col, val))
+                    .collect();
+                let content = if keyed.is_empty() { row.join(" | ") } else { keyed.join(" | ") };
+                let mut rnode = TreeNode::new(NodeType::TableRow, content);
+                rnode.metadata.insert("row_index".to_string(), serde_json::json!(idx));
+                let _ = tree.add_node(&table_id, rnode);
             }
         }
 
@@ -674,5 +975,142 @@ pub fn get_parser_for_file(path: &str) -> Box<dyn DocumentParser> {
         "html" | "htm" => Box::new(CodeParser { language: "html".into() }),
         "css" | "scss" | "sass" | "less" => Box::new(CodeParser { language: "css".into() }),
         _ => Box::new(PlainTextParser),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- detect_heading tests ---
+
+    #[test]
+    fn heading_chapter() {
+        assert_eq!(detect_heading("Chapter 1"), Some(1));
+        assert_eq!(detect_heading("chapter 2: introduction"), Some(1));
+    }
+
+    #[test]
+    fn heading_part() {
+        assert_eq!(detect_heading("Part I"), Some(1));
+    }
+
+    #[test]
+    fn heading_section_keyword() {
+        assert_eq!(detect_heading("Section 3.2"), Some(2));
+        assert_eq!(detect_heading("Appendix A"), Some(2));
+    }
+
+    #[test]
+    fn heading_numbered() {
+        assert_eq!(detect_heading("1. Introduction"), Some(1));
+        assert_eq!(detect_heading("2.3 Methods"), Some(2));
+        assert_eq!(detect_heading("1.2.1 Overview"), Some(3));
+    }
+
+    #[test]
+    fn heading_all_caps() {
+        assert_eq!(detect_heading("ABSTRACT"), Some(2));
+        assert_eq!(detect_heading("RESULTS AND DISCUSSION"), Some(2));
+    }
+
+    #[test]
+    fn heading_short_title_case() {
+        // "Introduction" and "Related Work" match SECTION_KEYWORDS → level 2
+        assert_eq!(detect_heading("Introduction"), Some(2));
+        assert_eq!(detect_heading("Related Work"), Some(2));
+        // Non-keyword title-case lines → level 3
+        assert_eq!(detect_heading("Data Analysis"), Some(3));
+    }
+
+    #[test]
+    fn heading_section_keywords() {
+        // CV sections
+        assert_eq!(detect_heading("Education"), Some(2));
+        assert_eq!(detect_heading("Work Experience"), Some(2));
+        assert_eq!(detect_heading("Skills"), Some(2));
+        assert_eq!(detect_heading("Projects"), Some(2));
+        assert_eq!(detect_heading("Skills:"), Some(2));
+        // Academic
+        assert_eq!(detect_heading("methodology"), Some(2));
+        assert_eq!(detect_heading("REFERENCES"), Some(2));
+    }
+
+    #[test]
+    fn not_a_heading_sentence() {
+        assert_eq!(detect_heading("This is a normal sentence with details."), None);
+        assert_eq!(detect_heading("The results show a clear trend,"), None);
+        // Too many words for short title-case rule
+        assert_eq!(detect_heading("Lovely Professional University Punjab India Campus"), None);
+    }
+
+    #[test]
+    fn not_a_heading_empty() {
+        assert_eq!(detect_heading(""), None);
+        assert_eq!(detect_heading("   "), None);
+    }
+
+    #[test]
+    fn not_a_heading_too_long() {
+        let long = "A".repeat(130);
+        assert_eq!(detect_heading(&long), None);
+    }
+
+    // --- MarkdownParser tests ---
+
+    #[test]
+    fn markdown_parser_basic() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_md_basic.md");
+        std::fs::write(&path, "# Title\n\nParagraph one.\n\n## Sub\n\nParagraph two.\n").unwrap();
+
+        let tree = MarkdownParser.parse(path.to_str().unwrap()).unwrap();
+        assert_eq!(tree.doc_type, DocType::Markdown);
+
+        let root = tree.get_node(&tree.root_id).unwrap();
+        // Should have at least the heading section as child
+        assert!(!root.children.is_empty());
+    }
+
+    // --- PlainTextParser tests ---
+
+    #[test]
+    fn plaintext_parser_splits_paragraphs() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_plain.txt");
+        std::fs::write(&path, "First paragraph.\n\nSecond paragraph.\n\nThird.\n").unwrap();
+
+        let tree = PlainTextParser.parse(path.to_str().unwrap()).unwrap();
+        let root = tree.get_node(&tree.root_id).unwrap();
+        assert_eq!(root.children.len(), 3);
+    }
+
+    // --- CodeParser tests ---
+
+    #[test]
+    fn code_parser_chunks() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_code.rs");
+        let lines: Vec<String> = (1..=120).map(|i| format!("// line {}", i)).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let tree = CodeParser { language: "rust".into() }.parse(path.to_str().unwrap()).unwrap();
+        let root = tree.get_node(&tree.root_id).unwrap();
+        // 120 lines / 60 per chunk = 2 chunks
+        assert_eq!(root.children.len(), 2);
+    }
+
+    // --- get_parser_for_file tests ---
+
+    #[test]
+    fn parser_dispatch() {
+        // Just verify it doesn't panic for various extensions
+        let _ = get_parser_for_file("test.md");
+        let _ = get_parser_for_file("test.pdf");
+        let _ = get_parser_for_file("test.docx");
+        let _ = get_parser_for_file("test.csv");
+        let _ = get_parser_for_file("test.xlsx");
+        let _ = get_parser_for_file("test.rs");
+        let _ = get_parser_for_file("test.unknown");
     }
 }

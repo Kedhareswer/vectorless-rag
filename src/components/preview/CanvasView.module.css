@@ -83,6 +83,16 @@
   fill: none;
 }
 
+/* Cross-doc relation edges */
+
+.relationEdge {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+  fill: none;
+  opacity: 0.6;
+}
+
 /* Nodes */
 
 .node {

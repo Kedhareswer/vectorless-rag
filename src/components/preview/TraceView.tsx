@@ -4,11 +4,39 @@ import {
   Zap,
   Clock,
   Check,
+  BookOpen,
+  Search,
+  FileText,
+  List,
+  Cpu,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useChatStore } from '../../stores/chat';
 import type { ExplorationStep } from '../../stores/chat';
 import styles from './TraceView.module.css';
+
+/** Map deterministic fetch operation names to human-friendly labels */
+function getStepLabel(tool: string): string {
+  switch (tool) {
+    case 'tree_overview': return 'Reading structure';
+    case 'search': return 'Searching content';
+    case 'expand': return 'Reading section';
+    case 'scan_lists': return 'Scanning lists & tables';
+    case 'llm_call': return 'Generating answer';
+    default: return tool;
+  }
+}
+
+function getStepIcon(tool: string) {
+  switch (tool) {
+    case 'tree_overview': return FileText;
+    case 'search': return Search;
+    case 'expand': return BookOpen;
+    case 'scan_lists': return List;
+    case 'llm_call': return Cpu;
+    default: return FileText;
+  }
+}
 
 /** Format milliseconds into a human-friendly string */
 function formatLatency(ms: number): string {
@@ -35,7 +63,8 @@ function StepItem({ step }: StepItemProps) {
       <div className={styles.stepNumber}>{step.stepNumber}</div>
       <div className={styles.stepBody}>
         <div className={styles.toolRow}>
-          <span className={styles.toolName}>{step.tool}</span>
+          {(() => { const Icon = getStepIcon(step.tool); return <Icon size={12} />; })()}
+          <span className={styles.toolName}>{getStepLabel(step.tool)}</span>
           {step.status === 'running' ? (
             <span className={styles.statusRunning} title="Running" />
           ) : (
@@ -44,14 +73,21 @@ function StepItem({ step }: StepItemProps) {
         </div>
 
         <div className={styles.badgeRow}>
-          <span className={styles.badge}>
-            <Clock size={10} />
-            {formatLatency(step.latencyMs)}
-          </span>
-          <span className={styles.badge}>
-            <Zap size={10} />
-            {step.tokensUsed} tokens
-          </span>
+          {step.latencyMs > 0 && (
+            <span className={styles.badge}>
+              <Clock size={10} />
+              {formatLatency(step.latencyMs)}
+            </span>
+          )}
+          {step.tokensUsed > 0 && (
+            <span className={styles.badge}>
+              <Zap size={10} />
+              {step.tokensUsed.toLocaleString()} tokens
+            </span>
+          )}
+          {step.tokensUsed === 0 && step.latencyMs === 0 && (
+            <span className={styles.badge}>local</span>
+          )}
         </div>
 
         {step.inputSummary && (

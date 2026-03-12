@@ -1,0 +1,30 @@
+/* Shared placeholder styles used by preview sub-views */
+
+.placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 24px;
+  text-align: center;
+}
+
+.placeholderIcon {
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+
+.placeholderText {
+  font-size: var(--text-base);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.placeholderHint {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  max-width: 240px;
+  line-height: 1.4;
+}

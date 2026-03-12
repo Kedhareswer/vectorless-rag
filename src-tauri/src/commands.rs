@@ -1,94 +1,160 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{Emitter, State};
-use serde::Deserialize;
+use std::sync::{Arc, Mutex};
+use tauri::ipc::Channel;
+use tauri::{Manager, State};
 
-/// Shared cancellation flag — set to true to abort the running query.
-pub struct CancelFlag(pub Arc<AtomicBool>);
-
-/// Truncate a string at a UTF-8 safe char boundary.
-fn safe_truncate(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
-use crate::agent::runtime::{build_system_prompt, AgentRuntime};
-use crate::agent::tools::{AgentTool, ToolInput};
-use crate::agent::query::{preprocess_query, QueryIntent};
-use crate::db::{Database, DocumentSummary, ConversationRecord, MessageRecord, CostSummaryRecord, StepRecord, TraceRecord};
+use crate::agent::events::ChatEvent;
+use crate::agent::run_agent_chat;
+use keyring;
+use crate::db::{CrossDocRelation, Database, DocumentSummary, ConversationRecord, MessageRecord, CostSummaryRecord, StepRecord, TraceRecord};
+use crate::document::cache::TreeCache;
+use crate::document::metadata::enrich_tree_metadata;
 use crate::document::parser::get_parser_for_file;
-use crate::document::tree::{DocumentTree, TreeNode, TreeNodeSummary};
-use crate::llm::provider::{LLMProvider, Message, ProviderConfig, Tool};
-use crate::llm::{AgentRouterProvider, AnthropicProvider, GoogleProvider, GroqProvider, OllamaProvider, OpenAICompatProvider, OpenRouterProvider};
+use crate::document::tree::{DocumentTree, RichNodeSummary, TreeNode, TreeNodeSummary};
+use crate::document::image::extract_images_from_path;
+use crate::llm::local::{self, DownloadProgress, LocalModelStatus, ModelOption};
+use crate::llm::provider::ProviderConfig;
+use crate::validation;
+
+/// Per-request cancellation flags keyed by request ID.
+/// Each active query registers its own flag; `abort_query` sets matching flags.
+pub struct CancelFlags(pub Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>);
+
+/// Load a document tree from cache, falling back to DB on miss.
+fn get_tree_cached(
+    db: &State<Database>,
+    cache: &State<Mutex<TreeCache>>,
+    doc_id: &str,
+) -> Result<DocumentTree, String> {
+    {
+        let cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+        if let Some(tree) = cache_guard.get(doc_id) {
+            return Ok(tree.clone());
+        }
+    }
+    let tree = db
+        .get_document(doc_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+    let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+    cache_guard.insert(doc_id.to_string(), tree.clone());
+    Ok(tree)
+}
 
 // --- Document commands ---
 
 #[tauri::command]
-pub fn list_documents(db: State<Mutex<Database>>) -> Result<Vec<DocumentSummary>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn list_documents(db: State<Database>) -> Result<Vec<DocumentSummary>, String> {
     db.list_documents().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_document(db: State<Mutex<Database>>, id: String) -> Result<DocumentTree, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-    db.get_document(&id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Document not found: {}", id))
+pub fn get_document(
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
+    id: String,
+) -> Result<DocumentTree, String> {
+    get_tree_cached(&db, &cache, &id)
 }
 
 #[tauri::command]
 pub fn ingest_document(
-    db: State<Mutex<Database>>,
+    app: tauri::AppHandle,
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
     file_path: String,
 ) -> Result<DocumentTree, String> {
+    validation::validate_file_path(&file_path)?;
     let parser = get_parser_for_file(&file_path);
-    let tree = parser.parse(&file_path).map_err(|e| e.to_string())?;
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let mut tree = parser.parse(&file_path).map_err(|e| e.to_string())?;
+
+    // Try to start the llama-server sidecar for LLM-powered enrichment.
+    // Non-fatal: if the sidecar binary isn't present or model isn't downloaded,
+    // enrichment silently falls back to heuristic extraction.
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let status = local::check_local_model(&app_data, &db);
+        if let Some(model_path) = status.model_path {
+            let _ = local::start_sidecar(&app_data, &model_path);
+        }
+    }
+
+    // Enrich nodes with metadata (LLM-generated if model loaded, else heuristic)
+    enrich_tree_metadata(&mut tree);
+
+    // Extract embedded images (PDF and DOCX)
+    let images = extract_images_from_path(&file_path, &tree.id);
+    // Attach image nodes to the tree root so they appear in the structure
+    if !images.is_empty() {
+        use crate::document::tree::{NodeType, TreeNode};
+        let root_id = tree.root_id.clone();
+        for img in &images {
+            let mut node = TreeNode::new(NodeType::Image, String::new());
+            node.id = img.id.clone();
+            node.metadata.insert("path".to_string(), serde_json::json!(img.path));
+            node.metadata.insert("mime_type".to_string(), serde_json::json!(img.mime_type));
+            if let Some((w, h)) = img.dimensions {
+                node.metadata.insert("width".to_string(), serde_json::json!(w));
+                node.metadata.insert("height".to_string(), serde_json::json!(h));
+            }
+            if let Some(desc) = &img.description {
+                node.summary = Some(desc.clone());
+            }
+            let _ = tree.add_node(&root_id, node);
+        }
+    }
+
     db.save_document(&tree, Some(&file_path))
         .map_err(|e| e.to_string())?;
+    // Populate cache with the enriched tree
+    let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+    cache_guard.insert(tree.id.clone(), tree.clone());
     Ok(tree)
 }
 
 #[tauri::command]
-pub fn delete_document(db: State<Mutex<Database>>, id: String) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-    db.delete_document(&id).map_err(|e| e.to_string())
+pub fn delete_document(
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
+    id: String,
+) -> Result<(), String> {
+    db.delete_document(&id).map_err(|e| e.to_string())?;
+    // Invalidate cache entry
+    let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+    cache_guard.invalidate(&id);
+    Ok(())
 }
 
 // --- Tree exploration commands ---
 
 #[tauri::command]
 pub fn get_tree_overview(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
     doc_id: String,
 ) -> Result<Vec<TreeNodeSummary>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-    let tree = db
-        .get_document(&doc_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+    let tree = get_tree_cached(&db, &cache, &doc_id)?;
     Ok(tree.tree_overview())
 }
 
 #[tauri::command]
+pub fn get_rich_overview(
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
+    doc_id: String,
+) -> Result<Vec<RichNodeSummary>, String> {
+    let tree = get_tree_cached(&db, &cache, &doc_id)?;
+    Ok(tree.rich_overview())
+}
+
+#[tauri::command]
 pub fn expand_node(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
     doc_id: String,
     node_id: String,
 ) -> Result<TreeNode, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-    let tree = db
-        .get_document(&doc_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+    let tree = get_tree_cached(&db, &cache, &doc_id)?;
     tree.get_node(&node_id)
         .cloned()
         .ok_or_else(|| format!("Node not found: {}", node_id))
@@ -96,15 +162,12 @@ pub fn expand_node(
 
 #[tauri::command]
 pub fn search_document(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
     doc_id: String,
     query: String,
 ) -> Result<Vec<TreeNode>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-    let tree = db
-        .get_document(&doc_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+    let tree = get_tree_cached(&db, &cache, &doc_id)?;
 
     let query_lower = query.to_lowercase();
     let matches: Vec<TreeNode> = tree
@@ -120,62 +183,55 @@ pub fn search_document(
 // --- Provider commands ---
 
 #[tauri::command]
-pub fn get_providers(db: State<Mutex<Database>>) -> Result<Vec<ProviderConfig>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn get_providers(db: State<Database>) -> Result<Vec<ProviderConfig>, String> {
     db.get_providers().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn save_provider(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     config: ProviderConfig,
 ) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    validation::validate_provider(&config)?;
     db.save_provider(&config).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_provider(db: State<Mutex<Database>>, id: String) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn delete_provider(db: State<Database>, id: String) -> Result<(), String> {
     db.delete_provider(&id).map_err(|e| e.to_string())
 }
 
 // --- Settings commands ---
 
 #[tauri::command]
-pub fn get_setting(db: State<Mutex<Database>>, key: String) -> Result<Option<String>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn get_setting(db: State<Database>, key: String) -> Result<Option<String>, String> {
     db.get_setting(&key).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_setting(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.set_setting(&key, &value).map_err(|e| e.to_string())
 }
 
-// --- Conversation commands (Feature 1: Chat Persistence) ---
+// --- Conversation commands ---
 
 #[tauri::command]
-pub fn list_conversations(db: State<Mutex<Database>>) -> Result<Vec<ConversationRecord>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn list_conversations(db: State<Database>) -> Result<Vec<ConversationRecord>, String> {
     db.list_conversations().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn save_conversation(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     id: String,
     title: String,
     doc_id: Option<String>,
 ) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     let now = chrono::Utc::now().to_rfc3339();
-    // Preserve original created_at if conversation already exists
     let created_at = db.get_conversation_created_at(&id)
         .unwrap_or(None)
         .unwrap_or_else(|| now.clone());
@@ -191,16 +247,15 @@ pub fn save_conversation(
 
 #[tauri::command]
 pub fn get_conversation_messages(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     conv_id: String,
 ) -> Result<Vec<MessageRecord>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.get_conversation_messages(&conv_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn save_message(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     id: String,
     conv_id: String,
     role: String,
@@ -214,36 +269,59 @@ pub fn save_message(
         content,
         created_at: now,
     };
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.save_message(&msg).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_conversation(db: State<Mutex<Database>>, conv_id: String) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn delete_conversation(db: State<Database>, conv_id: String) -> Result<(), String> {
     db.delete_conversation(&conv_id).map_err(|e| e.to_string())
+}
+
+// --- Conversation-Document association commands ---
+
+#[tauri::command]
+pub fn add_doc_to_conversation(
+    db: State<Database>,
+    conv_id: String,
+    doc_id: String,
+) -> Result<(), String> {
+    db.add_doc_to_conversation(&conv_id, &doc_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_doc_from_conversation(
+    db: State<Database>,
+    conv_id: String,
+    doc_id: String,
+) -> Result<(), String> {
+    db.remove_doc_from_conversation(&conv_id, &doc_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_conversation_doc_ids(
+    db: State<Database>,
+    conv_id: String,
+) -> Result<Vec<String>, String> {
+    db.get_conversation_doc_ids(&conv_id).map_err(|e| e.to_string())
 }
 
 // --- Trace commands ---
 
 #[tauri::command]
 pub fn get_traces(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     conv_id: String,
 ) -> Result<Vec<TraceRecord>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.get_traces(&conv_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_steps(db: State<Mutex<Database>>, msg_id: String) -> Result<Vec<StepRecord>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn get_steps(db: State<Database>, msg_id: String) -> Result<Vec<StepRecord>, String> {
     db.get_steps(&msg_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_cost_summary(db: State<Mutex<Database>>) -> Result<Vec<CostSummaryRecord>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn get_cost_summary(db: State<Database>) -> Result<Vec<CostSummaryRecord>, String> {
     db.get_cost_summary().map_err(|e| e.to_string())
 }
 
@@ -251,7 +329,7 @@ pub fn get_cost_summary(db: State<Mutex<Database>>) -> Result<Vec<CostSummaryRec
 
 #[tauri::command]
 pub fn save_bookmark(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     doc_id: String,
     node_id: String,
     label: String,
@@ -264,30 +342,269 @@ pub fn save_bookmark(
         label,
         created_at: now,
     };
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.save_bookmark(&bookmark).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_bookmarks(
-    db: State<Mutex<Database>>,
+    db: State<Database>,
     doc_id: String,
 ) -> Result<Vec<crate::db::BookmarkRecord>, String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
     db.get_bookmarks(&doc_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_bookmark(db: State<Mutex<Database>>, id: String) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+pub fn delete_bookmark(db: State<Database>, id: String) -> Result<(), String> {
     db.delete_bookmark(&id).map_err(|e| e.to_string())
+}
+
+// --- Cross-doc relations command ---
+
+#[tauri::command]
+pub fn get_cross_doc_relations(
+    db: State<Database>,
+    doc_ids: Vec<String>,
+) -> Result<Vec<CrossDocRelation>, String> {
+    db.get_cross_doc_relations_for_docs(&doc_ids).map_err(|e| e.to_string())
+}
+
+// --- Local model commands ---
+
+#[tauri::command]
+pub fn get_model_options() -> Vec<ModelOption> {
+    local::get_model_options()
+}
+
+#[tauri::command]
+pub fn check_local_model(
+    app: tauri::AppHandle,
+    db: State<Database>,
+) -> Result<LocalModelStatus, String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    Ok(local::check_local_model(&app_data, &db))
+}
+
+#[tauri::command]
+pub async fn download_local_model(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    on_progress: Channel<DownloadProgress>,
+    model_id: String,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DownloadProgress>();
+
+    // Forward progress to Tauri channel
+    let channel_clone = on_progress.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let _ = channel_clone.send(progress);
+        }
+    });
+
+    let dest = local::download_model(&app_data, &model_id, tx).await?;
+
+    let _ = forwarder.await;
+
+    // Save model info to settings
+    db.set_setting("local_model_id", &model_id)
+        .map_err(|e| e.to_string())?;
+    db.set_setting("local_model_path", &dest.to_string_lossy())
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_local_model(
+    app: tauri::AppHandle,
+    db: State<Database>,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    local::delete_local_model(&app_data, &db)
+}
+
+// --- Re-enrich command ---
+
+/// Re-run metadata enrichment on an already-ingested document.
+/// Uses the local sidecar model if running, otherwise falls back to heuristic extraction.
+/// Clears existing summaries so they are regenerated, then saves the updated tree.
+#[tauri::command]
+pub fn reenrich_document(
+    app: tauri::AppHandle,
+    db: State<Database>,
+    cache: State<Mutex<TreeCache>>,
+    doc_id: String,
+) -> Result<(), String> {
+    let mut tree = db
+        .get_document(&doc_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+
+    // Try to start the sidecar if a model is available
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let status = local::check_local_model(&app_data, &db);
+        if let Some(model_path) = status.model_path {
+            let _ = local::start_sidecar(&app_data, &model_path);
+        }
+    }
+
+    // Clear existing summaries on top-level nodes so they are regenerated
+    let root_id = tree.root_id.clone();
+    let child_ids: Vec<String> = tree
+        .get_node(&root_id)
+        .map(|r| r.children.clone())
+        .unwrap_or_default();
+    for child_id in &child_ids {
+        if let Some(node) = tree.nodes.get_mut(child_id) {
+            node.summary = None;
+            node.metadata.remove("entities");
+            node.metadata.remove("topics");
+        }
+    }
+
+    enrich_tree_metadata(&mut tree);
+
+    db.save_document(&tree, None).map_err(|e| e.to_string())?;
+
+    // Invalidate cache so next load gets fresh tree
+    let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+    cache_guard.invalidate(&doc_id);
+    cache_guard.insert(doc_id, tree);
+
+    Ok(())
+}
+
+// --- Image description command ---
+
+/// Describe an image node using a vision-capable LLM provider.
+/// `image_path` is the local filesystem path to the extracted image file.
+/// `provider_config` is the active provider config serialised as JSON.
+#[tauri::command]
+pub async fn describe_image(
+    db: State<'_, Database>,
+    doc_id: String,
+    node_id: String,
+    image_path: String,
+) -> Result<String, String> {
+    use crate::llm::provider::Message;
+    use crate::agent::chat_handler::create_provider;
+
+    validation::validate_file_path(&image_path)?;
+
+    // Read image bytes and base64-encode
+    let bytes = std::fs::read(&image_path)
+        .map_err(|e| format!("Failed to read image: {}", e))?;
+    let b64 = base64_encode(&bytes);
+
+    let ext = std::path::Path::new(&image_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpeg")
+        .to_lowercase();
+    let media_type = if ext == "png" { "image/png" } else { "image/jpeg" };
+
+    // Get the active provider
+    let configs = db.get_providers().map_err(|e| e.to_string())?;
+    let active_id = db.get_setting("active_provider")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let config = configs
+        .into_iter()
+        .find(|c| c.id == active_id)
+        .ok_or("No active provider configured")?;
+
+    let provider = create_provider(config)?;
+
+    // Build a vision message. OpenAI-compatible format: content as array with
+    // image_url object. Providers that support vision (GPT-4o, Gemini) handle this.
+    let vision_content = serde_json::json!([
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": format!("data:{};base64,{}", media_type, b64)
+            }
+        },
+        {
+            "type": "text",
+            "text": "Describe what is shown in this image in 1-3 sentences. Focus on the content relevant to a document (charts, diagrams, tables, figures). Be specific about data or labels visible."
+        }
+    ]);
+
+    let messages = vec![
+        Message::text("system", "You are a document analysis assistant. Describe images concisely and accurately."),
+        Message {
+            role: "user".to_string(),
+            content: vision_content.to_string(),
+            tool_calls_raw: None,
+            tool_call_id: None,
+            tool_name: None,
+        },
+    ];
+
+    let response = provider.chat(messages, None).await
+        .map_err(|e| format!("Vision LLM error: {}", e))?;
+
+    let description = response.content
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    // Persist the description into the document tree
+    if let Ok(Some(mut tree)) = db.get_document(&doc_id) {
+        if let Some(node) = tree.nodes.get_mut(&node_id) {
+            node.summary = Some(description.clone());
+            node.metadata.insert("described".to_string(), serde_json::json!(true));
+        }
+        let _ = db.save_document(&tree, None);
+    }
+
+    Ok(description)
+}
+
+/// Simple base64 encoder — avoids pulling in a separate crate.
+fn base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 { out.push(CHARS[((n >> 6) & 63) as usize] as char); } else { out.push('='); }
+        if chunk.len() > 2 { out.push(CHARS[(n & 63) as usize] as char); } else { out.push('='); }
+    }
+    out
 }
 
 // --- Cancel command ---
 
 #[tauri::command]
-pub fn abort_query(cancel_flag: State<CancelFlag>) -> Result<(), String> {
-    cancel_flag.0.store(true, Ordering::SeqCst);
+pub fn abort_query(
+    cancel_flags: State<CancelFlags>,
+    request_id: Option<String>,
+) -> Result<(), String> {
+    let flags = cancel_flags.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+    match request_id {
+        Some(id) => {
+            // Cancel a specific request
+            if let Some(flag) = flags.get(&id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        None => {
+            // Cancel ALL active requests
+            for flag in flags.values() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -326,229 +643,44 @@ pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, S
 
 // --- Agent chat command ---
 
-#[derive(serde::Serialize, Clone)]
-struct ExplorationStepStartEvent {
-    /// Correlation ID to match events to a specific chat request
-    #[serde(rename = "requestId")]
-    request_id: String,
-    #[serde(rename = "stepNumber")]
-    step_number: u32,
-    tool: String,
-    #[serde(rename = "inputSummary")]
-    input_summary: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct ExplorationStepCompleteEvent {
-    #[serde(rename = "requestId")]
-    request_id: String,
-    #[serde(rename = "stepNumber")]
-    step_number: u32,
-    #[serde(rename = "outputSummary")]
-    output_summary: String,
-    #[serde(rename = "tokensUsed")]
-    tokens_used: u32,
-    #[serde(rename = "latencyMs")]
-    latency_ms: u64,
-    /// Estimated cost for this step ($ based on input/output token split)
-    cost: f64,
-    /// Node IDs visited/accessed by this tool call (Feature 4: Live Visualization)
-    #[serde(rename = "nodeIds")]
-    node_ids: Vec<String>,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct ChatResponseEvent {
-    #[serde(rename = "requestId")]
-    request_id: String,
-    content: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct ChatTokenEvent {
-    #[serde(rename = "requestId")]
-    request_id: String,
-    token: String,
-    done: bool,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct ChatErrorEvent {
-    #[serde(rename = "requestId")]
-    request_id: String,
-    error: String,
-}
-
-/// Emit a response token-by-token for streaming UX.
-/// Splits on word boundaries and emits each chunk with a small yield.
-async fn emit_streaming_response(app: &tauri::AppHandle, request_id: &str, content: &str) {
-    // Split into word-sized chunks for smoother streaming
-    let words: Vec<&str> = content.split_inclusive(|c: char| c.is_whitespace() || c == '\n')
-        .collect();
-
-    let chunk_size = 3; // Emit ~3 words at a time for natural flow
-    for chunk in words.chunks(chunk_size) {
-        let token: String = chunk.concat();
-        let _ = app.emit("chat-token", ChatTokenEvent { request_id: request_id.to_string(), token, done: false });
-        tokio::task::yield_now().await;
-    }
-    let _ = app.emit("chat-token", ChatTokenEvent { request_id: request_id.to_string(), token: String::new(), done: true });
-}
-
-fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, String> {
-    let provider_name = config.name.to_lowercase();
-    match provider_name.as_str() {
-        "ollama" => Ok(Box::new(OllamaProvider::new(config))),
-        "groq" => Ok(Box::new(GroqProvider::new(config))),
-        "google" => Ok(Box::new(GoogleProvider::new(config))),
-        "openrouter" => Ok(Box::new(OpenRouterProvider::new(config))),
-        "agentrouter" => Ok(Box::new(AgentRouterProvider::new(config))),
-        "anthropic" => Ok(Box::new(AnthropicProvider::new(config))),
-        "openai" => Ok(Box::new(OpenAICompatProvider::new(
-            config,
-            "OpenAI",
-            "https://api.openai.com/v1",
-        ))),
-        "deepseek" => Ok(Box::new(OpenAICompatProvider::new(
-            config,
-            "DeepSeek",
-            "https://api.deepseek.com/v1",
-        ))),
-        "xai" => Ok(Box::new(OpenAICompatProvider::new(
-            config,
-            "xAI",
-            "https://api.x.ai/v1",
-        ))),
-        "qwen" => Ok(Box::new(OpenAICompatProvider::new(
-            config,
-            "Qwen",
-            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-        ))),
-        "openai-compat" => Ok(Box::new(OpenAICompatProvider::new(
-            config,
-            "Custom",
-            "",
-        ))),
-        _ => Err(format!("Unknown provider: {}", config.name)),
-    }
-}
-
-fn build_llm_tools(provider_name: &str) -> Vec<Tool> {
-    let defs = crate::agent::tools::get_tool_definitions();
-    let is_google = provider_name == "google";
-
-    defs.into_iter()
-        .map(|td| {
-            let parameters = if is_google {
-                crate::agent::tools::get_gemini_tool_definitions()
-                    .into_iter()
-                    .find(|g| g["name"].as_str() == Some(&td.name))
-                    .map(|g| g["parameters"].clone())
-                    .unwrap_or(td.parameters_schema)
-            } else {
-                td.parameters_schema
-            };
-            Tool {
-                name: td.name,
-                description: td.description,
-                parameters,
-            }
-        })
-        .collect()
-}
-
-/// Extract node IDs from tool call arguments and results (Feature 4)
-fn extract_node_ids(tool_name: &str, params: &HashMap<String, serde_json::Value>, result: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-
-    // Extract from params
-    if let Some(v) = params.get("node_id").and_then(|v| v.as_str()) {
-        ids.push(v.to_string());
-    }
-    if let Some(v) = params.get("node_a").and_then(|v| v.as_str()) {
-        ids.push(v.to_string());
-    }
-    if let Some(v) = params.get("node_b").and_then(|v| v.as_str()) {
-        ids.push(v.to_string());
-    }
-
-    // For search results, try to extract matched node IDs from the JSON output
-    if tool_name == "search_content" {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
-            if let Some(matches) = parsed["matches"].as_array() {
-                for m in matches.iter().take(10) {
-                    if let Some(id) = m["id"].as_str() {
-                        ids.push(id.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    ids
-}
-
-/// Per-model pricing rates ($ per 1M tokens)
-#[derive(Deserialize, Clone, Debug)]
-struct ModelPricing {
-    input: f64,
-    output: f64,
-}
-
-/// Load the pricing table once from the embedded JSON.
-fn pricing_table() -> &'static HashMap<String, ModelPricing> {
-    static TABLE: OnceLock<HashMap<String, ModelPricing>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let json_str = include_str!("pricing.json");
-        serde_json::from_str(json_str).unwrap_or_default()
-    })
-}
-
-/// Estimate cost using per-model input/output rates from pricing.json.
-/// Falls back to _default rates if model is not found.
-fn estimate_cost(model_id: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-    let table = pricing_table();
-    let rates = table
-        .get(model_id)
-        .or_else(|| table.get("_default"))
-        .cloned()
-        .unwrap_or(ModelPricing { input: 0.50, output: 1.50 });
-    (input_tokens as f64 / 1_000_000.0) * rates.input
-        + (output_tokens as f64 / 1_000_000.0) * rates.output
-}
-
 #[tauri::command]
 pub async fn chat_with_agent(
-    app: tauri::AppHandle,
-    db: State<'_, Mutex<Database>>,
-    cancel_flag: State<'_, CancelFlag>,
+    db: State<'_, Database>,
+    cache: State<'_, Mutex<TreeCache>>,
+    cancel_flags: State<'_, CancelFlags>,
+    on_event: Channel<ChatEvent>,
     message: String,
     doc_ids: Vec<String>,
     provider_id: String,
     conv_id: Option<String>,
 ) -> Result<(), String> {
-    // Reset cancel flag at start of new query
-    cancel_flag.0.store(false, Ordering::SeqCst);
-    let cancel = cancel_flag.0.clone();
-    // Generate a unique request correlation ID
-    let request_id = uuid::Uuid::new_v4().to_string();
+    validation::validate_chat_input(&message, &doc_ids, &provider_id)?;
 
-    // Support both single doc_id and multiple doc_ids
-    if doc_ids.is_empty() {
-        return Err("At least one document must be selected".to_string());
+    // Create a per-request cancel flag
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut flags = cancel_flags.0.lock().map_err(|e| format!("Lock error: {}", e))?;
+        flags.insert(request_id.clone(), cancel.clone());
     }
 
-    // Clone data out of the mutex before any async work
+    // Extract data from Tauri state, using cache where possible
     let (trees, provider_config) = {
-        let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
-
         let mut trees = Vec::new();
-        for doc_id in &doc_ids {
-            let tree = db
-                .get_document(doc_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Document not found: {}", doc_id))?;
-            trees.push(tree);
+        {
+            let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+            for doc_id in &doc_ids {
+                if let Some(tree) = cache_guard.get(doc_id) {
+                    trees.push(tree.clone());
+                } else {
+                    let tree = db
+                        .get_document(doc_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+                    cache_guard.insert(doc_id.clone(), tree.clone());
+                    trees.push(tree);
+                }
+            }
         }
 
         let providers = db.get_providers().map_err(|e| e.to_string())?;
@@ -560,440 +692,74 @@ pub async fn chat_with_agent(
         (trees, provider_config)
     };
 
-    // Use the first tree as primary, but make all available for tools
-    let primary_tree = &trees[0];
+    // Delegate to the agent chat handler
+    let result = run_agent_chat(
+        &on_event,
+        &db,
+        cancel,
+        message,
+        trees,
+        provider_config,
+        conv_id,
+        doc_ids,
+    )
+    .await;
 
-    let provider_name = provider_config.name.to_lowercase();
-    let model_id = provider_config.model.clone();
-    let provider = create_provider(provider_config)?;
-
-    let processed = preprocess_query(&message);
-
-    // Build combined tree overview for multi-doc queries
-    let mut overview_parts = Vec::new();
-    for tree in &trees {
-        let overview = tree.tree_overview();
-        let text = serde_json::to_string_pretty(&overview)
-            .unwrap_or_else(|_| "Unable to generate tree overview".to_string());
-        if trees.len() > 1 {
-            overview_parts.push(format!("=== Document: {} ===\n{}", tree.name, text));
-        } else {
-            overview_parts.push(text);
-        }
-    }
-    let overview_text = overview_parts.join("\n\n");
-
-    let exploration_hint = if trees.len() > 1 {
-        format!(
-            "{}\n\nYou have {} documents loaded. You can compare nodes across documents using compare_nodes.",
-            processed.exploration_hint,
-            trees.len()
-        )
-    } else {
-        processed.exploration_hint.clone()
-    };
-
-    let system_prompt = build_system_prompt(&overview_text, &exploration_hint);
-    let tools = build_llm_tools(&provider_name);
-    let adaptive_max_steps = processed.recommended_max_steps;
-
-    // Use a separate throwaway runtime for pre-computation so it doesn't
-    // eat into the agent's actual step budget.
-    let mut pre_runtime = AgentRuntime::new(10);
-
-    // Pre-search against the primary tree (only for targeted queries)
-    let mut pre_search_results = Vec::new();
-    if matches!(processed.intent, QueryIntent::Entity | QueryIntent::Specific | QueryIntent::Factual) {
-        for term in processed.search_terms.iter().take(2) {
-            let mut params = HashMap::new();
-            params.insert("query".to_string(), serde_json::Value::String(term.clone()));
-            let input = ToolInput {
-                tool: AgentTool::SearchContent,
-                params,
-            };
-            if let Ok(output) = pre_runtime.execute_tool(primary_tree, &input) {
-                let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                if result_str.len() > 20 {
-                    pre_search_results.push((term.clone(), result_str));
-                }
-            }
-        }
+    // Clean up the cancel flag for this request
+    if let Ok(mut flags) = cancel_flags.0.lock() {
+        flags.remove(&request_id);
     }
 
-    // Only pre-expand for very small documents (≤3 top-level nodes) to avoid
-    // burning tokens on large docs. The agent can expand selectively.
-    let tree_overview_summary = primary_tree.tree_overview();
-    let mut pre_expand_results = Vec::new();
-    if tree_overview_summary.len() <= 3 {
-        for summary in &tree_overview_summary {
-            let mut params = HashMap::new();
-            params.insert("node_id".to_string(), serde_json::Value::String(summary.id.clone()));
-            let input = ToolInput {
-                tool: AgentTool::ExpandNode,
-                params,
-            };
-            if let Ok(output) = pre_runtime.execute_tool(primary_tree, &input) {
-                let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                if result_str.len() > 2000 {
-                    pre_expand_results.push(format!("{}... [truncated]", safe_truncate(&result_str, 2000)));
-                } else {
-                    pre_expand_results.push(result_str);
-                }
-            }
-        }
-    }
-
-    // Now create the real runtime with full budget for the agent
-    let mut runtime = AgentRuntime::new(adaptive_max_steps);
-
-    // Load conversation history for multi-turn context
-    let mut history_messages: Vec<Message> = Vec::new();
-    if let Some(ref cid) = conv_id {
-        if let Ok(db_guard) = db.lock() {
-            if let Ok(records) = db_guard.get_conversation_messages(cid) {
-                // Skip the last message if it matches the current user message (just added by frontend)
-                let relevant: Vec<_> = records.iter()
-                    .filter(|r| !(r.role == "user" && r.content == message))
-                    .collect();
-                // Include recent history (limit to last 10 messages to avoid token bloat)
-                let start = if relevant.len() > 10 { relevant.len() - 10 } else { 0 };
-                for r in &relevant[start..] {
-                    history_messages.push(Message::text(&r.role, &r.content));
-                }
-            }
-        }
-    }
-
-    let mut messages: Vec<Message> = vec![
-        Message::text("system", &system_prompt),
-    ];
-    messages.extend(history_messages);
-    messages.push(Message::text("user", &message));
-
-    if !pre_search_results.is_empty() || !pre_expand_results.is_empty() {
-        let mut context_parts = Vec::new();
-        if !pre_search_results.is_empty() {
-            context_parts.push("I've already searched the document for relevant content. Here are the search results:".to_string());
-            for (term, result) in &pre_search_results {
-                let truncated = if result.len() > 2000 { safe_truncate(result, 2000) } else { result };
-                context_parts.push(format!("Search for \"{}\": {}", term, truncated));
-            }
-        }
-        if !pre_expand_results.is_empty() {
-            context_parts.push("I've also pre-expanded the document sections. Here is the actual content:".to_string());
-            for result in &pre_expand_results {
-                context_parts.push(result.clone());
-            }
-        }
-        context_parts.push("Use this information along with additional tool calls to provide a thorough answer.".to_string());
-        messages.push(Message::text("system", &context_parts.join("\n\n")));
-    }
-
-    let max_steps = adaptive_max_steps;
-    let mut total_tokens = 0u32;
-    let mut total_input_tokens = 0u32;
-    let mut total_output_tokens = 0u32;
-    let mut tool_call_counter = 0u32;
-    let mut nudge_counter = 0u32;
-    let max_nudges = 2u32;
-    let min_tool_calls = processed.min_tool_calls;
-    let overall_start = tokio::time::Instant::now();
-    // Cap message context to prevent unbounded memory growth
-    let max_context_messages = 60;
-
-    for _llm_turn in 1..=max_steps {
-
-        // Check if user cancelled
-        if cancel.load(Ordering::SeqCst) {
-            let _ = app.emit(
-                "chat-error",
-                ChatErrorEvent {
-                    request_id: request_id.clone(),
-                    error: "Query cancelled.".to_string(),
-                },
-            );
-            return Ok(());
-        }
-
-        // Trim oldest mid-conversation messages if context grows too large,
-        // keeping system prompt (first) and recent messages
-        if messages.len() > max_context_messages {
-            let keep_front = 2; // system + user query
-            let keep_back = max_context_messages - keep_front;
-            let drain_end = messages.len() - keep_back;
-            messages.drain(keep_front..drain_end);
-        }
-
-        // Time the LLM call itself — this is the real latency
-        let llm_turn_start = tokio::time::Instant::now();
-
-        let llm_response = match provider
-            .chat(messages.clone(), Some(tools.clone()))
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                let _ = app.emit(
-                    "chat-error",
-                    ChatErrorEvent {
-                        request_id: request_id.clone(),
-                        error: format!("LLM error: {}", e),
-                    },
-                );
-                return Err(format!("LLM error: {}", e));
-            }
-        };
-
-        total_tokens += llm_response.tokens_used;
-        total_input_tokens += llm_response.input_tokens;
-        total_output_tokens += llm_response.output_tokens;
-
-        if llm_response.tool_calls.is_empty() {
-            if tool_call_counter < min_tool_calls && _llm_turn < max_steps && nudge_counter < max_nudges {
-                nudge_counter += 1;
-                let nudge = format!(
-                    "You haven't explored the document enough yet ({} tool calls, minimum {} required). \
-                     Use expand_node to read the actual content of relevant sections before answering. \
-                     The tree overview only shows titles, not content.",
-                    tool_call_counter, min_tool_calls
-                );
-                if let Some(ref partial) = llm_response.content {
-                    messages.push(Message::text("assistant", partial));
-                }
-                messages.push(Message::text("user", &nudge));
-                continue;
-            }
-
-            let answer = llm_response
-                .content
-                .unwrap_or_else(|| "I explored the document but couldn't generate a response. Try rephrasing your question or asking about a different aspect of the document.".to_string());
-
-            // Stream tokens for progressive UX
-            emit_streaming_response(&app, &request_id, &answer).await;
-
-            // Also emit full response for backwards compatibility
-            let _ = app.emit(
-                "chat-response",
-                ChatResponseEvent {
-                    request_id: request_id.clone(),
-                    content: answer.clone(),
-                },
-            );
-
-            runtime.context.compute_relevance_scores();
-            let trace_conv_id = conv_id.as_deref().unwrap_or(&doc_ids[0]);
-            save_trace_data(&db, trace_conv_id, &model_id, &runtime, total_tokens, total_input_tokens, total_output_tokens, overall_start.elapsed().as_millis() as u64)?;
-            return Ok(());
-        }
-
-        let assistant_content = llm_response.content.as_deref();
-        messages.push(Message::assistant_with_tool_calls(
-            assistant_content,
-            llm_response.raw_tool_calls.clone(),
-        ));
-
-        // LLM call time — distribute evenly across all tool calls in the batch
-        let llm_turn_ms = llm_turn_start.elapsed().as_millis() as u64;
-        let turn_tool_count = llm_response.tool_calls.len() as u32;
-        let tokens_per_tool = if turn_tool_count > 0 { llm_response.tokens_used / turn_tool_count } else { 0 };
-        let input_per_tool = if turn_tool_count > 0 { llm_response.input_tokens / turn_tool_count } else { 0 };
-        let output_per_tool = if turn_tool_count > 0 { llm_response.output_tokens / turn_tool_count } else { 0 };
-        let latency_per_tool = if turn_tool_count > 0 { llm_turn_ms / turn_tool_count as u64 } else { 0 };
-        let cost_per_tool = estimate_cost(&model_id, input_per_tool, output_per_tool);
-
-        for tool_call in &llm_response.tool_calls {
-            let agent_tool = match AgentTool::from_name(&tool_call.name) {
-                Some(t) => t,
-                None => {
-                    let error_msg = format!("Unknown tool: {}", tool_call.name);
-                    messages.push(Message::tool_result(
-                        &tool_call.id,
-                        &tool_call.name,
-                        &error_msg,
-                    ));
-                    continue;
-                }
-            };
-
-            let input_summary = match serde_json::to_string(&tool_call.arguments) {
-                Ok(s) => {
-                    if s.len() > 100 {
-                        format!("{}...", safe_truncate(&s, 100))
-                    } else {
-                        s
-                    }
-                }
-                Err(_) => "{}".to_string(),
-            };
-
-            tool_call_counter += 1;
-            let current_step = tool_call_counter;
-
-            let _ = app.emit(
-                "exploration-step-start",
-                ExplorationStepStartEvent {
-                    request_id: request_id.clone(),
-                    step_number: current_step,
-                    tool: tool_call.name.clone(),
-                    input_summary: input_summary.clone(),
-                },
-            );
-
-            let params: HashMap<String, serde_json::Value> =
-                match tool_call.arguments.as_object() {
-                    Some(obj) => obj.clone().into_iter().collect(),
-                    None => HashMap::new(),
-                };
-
-            let tool_input = ToolInput {
-                tool: agent_tool,
-                params: params.clone(),
-            };
-
-            let tool_exec_start = tokio::time::Instant::now();
-
-            // For multi-doc: try all trees if the node isn't found in the primary one
-            let tool_result = {
-                let mut result = None;
-                for tree in &trees {
-                    match runtime.execute_tool(tree, &tool_input) {
-                        Ok(output) => {
-                            let result_str = serde_json::to_string(&output.result)
-                                .unwrap_or_else(|_| "{}".to_string());
-                            if result_str.len() > 4000 {
-                                result = Some(format!("{}... [truncated, {} chars total]", safe_truncate(&result_str, 4000), result_str.len()));
-                            } else {
-                                result = Some(result_str);
-                            }
-                            break;
-                        }
-                        Err(_) if trees.len() > 1 => continue,
-                        Err(e) => {
-                            result = Some(format!("Tool error: {}", e));
-                            break;
-                        }
-                    }
-                }
-                result.unwrap_or_else(|| "Tool error: node not found in any loaded document".to_string())
-            };
-
-            let output_summary = if tool_result.len() > 150 {
-                format!("{}...", safe_truncate(&tool_result, 150))
-            } else {
-                tool_result.clone()
-            };
-
-            // Extract node IDs for live visualization (Feature 4)
-            let node_ids = extract_node_ids(&tool_call.name, &params, &tool_result);
-
-            // Include both LLM time (distributed) and local tool execution time
-            let tool_exec_ms = tool_exec_start.elapsed().as_millis() as u64;
-            let _ = app.emit(
-                "exploration-step-complete",
-                ExplorationStepCompleteEvent {
-                    request_id: request_id.clone(),
-                    step_number: current_step,
-                    output_summary: output_summary.clone(),
-                    tokens_used: tokens_per_tool,
-                    latency_ms: latency_per_tool + tool_exec_ms,
-                    cost: cost_per_tool,
-                    node_ids,
-                },
-            );
-
-            messages.push(Message::tool_result(
-                &tool_call.id,
-                &tool_call.name,
-                &tool_result,
-            ));
-        }
-    }
-
-    messages.push(Message::text(
-        "user",
-        "You have used all available exploration steps. Based on everything you explored, provide a clear and helpful answer to the user's original question. If the document does not contain the information the user asked about, say so explicitly and share whatever relevant information you did find. Never leave the user without a response.",
-    ));
-
-    let final_response = match provider.chat(messages, None).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            let _ = app.emit(
-                "chat-error",
-                ChatErrorEvent {
-                    request_id: request_id.clone(),
-                    error: format!("LLM error on final synthesis: {}", e),
-                },
-            );
-            return Err(format!("LLM error on final synthesis: {}", e));
-        }
-    };
-
-    total_tokens += final_response.tokens_used;
-    total_input_tokens += final_response.input_tokens;
-    total_output_tokens += final_response.output_tokens;
-
-    let answer = final_response
-        .content
-        .unwrap_or_else(|| "I explored the document but couldn't find information relevant to your question. The document may not cover this topic — try rephrasing or asking about something within the document's scope.".to_string());
-
-    // Stream tokens for progressive UX
-    emit_streaming_response(&app, &request_id, &answer).await;
-
-    let _ = app.emit(
-        "chat-response",
-        ChatResponseEvent { request_id: request_id.clone(), content: answer },
-    );
-
-    runtime.context.compute_relevance_scores();
-    let trace_conv_id = conv_id.as_deref().unwrap_or(&doc_ids[0]);
-    save_trace_data(&db, trace_conv_id, &model_id, &runtime, total_tokens, total_input_tokens, total_output_tokens, overall_start.elapsed().as_millis() as u64)?;
-
-    Ok(())
+    result
 }
 
-fn save_trace_data(
-    db: &State<'_, Mutex<Database>>,
-    conv_id: &str,
-    model_id: &str,
-    runtime: &AgentRuntime,
-    total_tokens: u32,
-    input_tokens: u32,
-    output_tokens: u32,
-    total_latency_ms: u64,
+// --- Clear app data command ---
+
+/// Wipe ALL app data: database, local model file, and keychain entries.
+/// This is equivalent to uninstall + reinstall without needing to find hidden folders.
+/// After this call the app is in a clean first-run state (the DB will be re-created on
+/// next launch). The frontend should reload / clear its store state after calling this.
+#[tauri::command]
+pub fn clear_app_data(
+    app: tauri::AppHandle,
+    db: State<Database>,
 ) -> Result<(), String> {
-    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    // Stop sidecar before touching its model file
+    local::stop_sidecar();
 
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    // Delete the local model file and clear its settings
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let _ = local::delete_local_model(&app_data, &db);
 
-    let cost = estimate_cost(model_id, input_tokens, output_tokens);
+        // Also wipe the llama-server binary on full reset (unlike "Remove model" which keeps it)
+        let bdir = local::bin_dir(&app_data);
+        if bdir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&bdir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
 
-    let trace = TraceRecord {
-        id: trace_id.clone(),
-        conv_id: conv_id.to_string(),
-        provider_name: model_id.to_string(),
-        total_tokens: total_tokens as i64,
-        total_cost: cost,
-        total_latency_ms: total_latency_ms as i64,
-        steps_count: runtime.steps.len() as i64,
-        created_at: now,
-        input_tokens: input_tokens as i64,
-        output_tokens: output_tokens as i64,
-    };
-    db.save_trace(&trace).map_err(|e| e.to_string())?;
+        // Delete the SQLite database file(s) — the .db, .db-wal, .db-shm
+        for suffix in &["vectorless-rag.db", "vectorless-rag.db-wal", "vectorless-rag.db-shm"] {
+            let p = app_data.join(suffix);
+            if p.exists() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
 
-    // Link steps to trace_id so get_steps(trace_id) can retrieve them
-    for step in &runtime.steps {
-        let step_record = StepRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            msg_id: trace_id.clone(),
-            tool_name: step.tool.clone(),
-            input_json: step.input_summary.clone(),
-            output_json: step.output_summary.clone(),
-            tokens_used: step.tokens_used as i64,
-            latency_ms: step.latency_ms as i64,
-        };
-        db.save_step(&step_record).map_err(|e| e.to_string())?;
+    // Clear OS keychain entries for all known providers
+    let provider_ids: Vec<String> = db
+        .get_providers()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    for id in &provider_ids {
+        let _ = keyring::Entry::new("vectorless-rag", id)
+            .and_then(|e| e.delete_credential());
     }
 
     Ok(())

@@ -3,11 +3,14 @@ pub mod agent;
 pub mod llm;
 pub mod db;
 pub mod commands;
+pub mod util;
+pub mod validation;
 
-use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use db::Database;
-use commands::CancelFlag;
+use commands::CancelFlags;
+use document::cache::TreeCache;
 
 /// Resolve the database path inside the platform app data directory.
 /// Falls back to current directory if unavailable.
@@ -54,14 +57,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(Mutex::new(db))
-        .manage(CancelFlag(Arc::new(AtomicBool::new(false))))
+        .manage(db)
+        .manage(Mutex::new(TreeCache::new(32)))
+        .manage(CancelFlags(Arc::new(Mutex::new(HashMap::new()))))
         .invoke_handler(tauri::generate_handler![
             commands::list_documents,
             commands::get_document,
             commands::ingest_document,
             commands::delete_document,
             commands::get_tree_overview,
+            commands::get_rich_overview,
             commands::expand_node,
             commands::search_document,
             commands::get_providers,
@@ -77,12 +82,23 @@ pub fn run() {
             commands::get_conversation_messages,
             commands::save_message,
             commands::delete_conversation,
+            commands::add_doc_to_conversation,
+            commands::remove_doc_from_conversation,
+            commands::get_conversation_doc_ids,
             commands::chat_with_agent,
             commands::abort_query,
             commands::open_file_dialog,
             commands::save_bookmark,
             commands::get_bookmarks,
             commands::delete_bookmark,
+            commands::get_cross_doc_relations,
+            commands::get_model_options,
+            commands::check_local_model,
+            commands::download_local_model,
+            commands::delete_local_model,
+            commands::describe_image,
+            commands::reenrich_document,
+            commands::clear_app_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

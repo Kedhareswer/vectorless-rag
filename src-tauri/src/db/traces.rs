@@ -39,7 +39,8 @@ pub struct EvalRecord {
 
 impl Database {
     pub fn save_trace(&self, trace: &TraceRecord) -> Result<(), DbError> {
-        self.conn.execute(
+        let conn = self.conn()?;
+        conn.execute(
             "INSERT OR REPLACE INTO traces (id, conv_id, provider_name, total_tokens, total_cost, total_latency_ms, steps_count, created_at, input_tokens, output_tokens)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -59,7 +60,8 @@ impl Database {
     }
 
     pub fn get_traces(&self, conv_id: &str) -> Result<Vec<TraceRecord>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             "SELECT id, conv_id, COALESCE(provider_name, '') as provider_name, total_tokens, total_cost, total_latency_ms, steps_count, created_at, COALESCE(input_tokens, 0), COALESCE(output_tokens, 0)
              FROM traces WHERE conv_id = ?1 ORDER BY created_at DESC",
         )?;
@@ -86,7 +88,8 @@ impl Database {
     }
 
     pub fn save_step(&self, step: &StepRecord) -> Result<(), DbError> {
-        self.conn.execute(
+        let conn = self.conn()?;
+        conn.execute(
             "INSERT OR REPLACE INTO exploration_steps (id, msg_id, tool_name, input_json, output_json, tokens_used, latency_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -103,7 +106,8 @@ impl Database {
     }
 
     pub fn get_steps(&self, msg_id: &str) -> Result<Vec<StepRecord>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             "SELECT id, msg_id, tool_name, input_json, output_json, tokens_used, latency_ms
              FROM exploration_steps WHERE msg_id = ?1",
         )?;
@@ -127,7 +131,8 @@ impl Database {
     }
 
     pub fn save_eval(&self, eval: &EvalRecord) -> Result<(), DbError> {
-        self.conn.execute(
+        let conn = self.conn()?;
+        conn.execute(
             "INSERT OR REPLACE INTO evals (id, trace_id, metric, score, details_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -142,7 +147,8 @@ impl Database {
     }
 
     pub fn get_evals(&self, trace_id: &str) -> Result<Vec<EvalRecord>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
             "SELECT id, trace_id, metric, score, details_json
              FROM evals WHERE trace_id = ?1",
         )?;

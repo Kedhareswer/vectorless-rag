@@ -1,41 +1,22 @@
-import { useState, useRef, useEffect, Fragment } from 'react';
-import { Send, Square, FileText, Compass, AlertCircle, Server, Upload } from 'lucide-react';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { useState, useRef, useEffect, useCallback, Fragment } from 'react';
+import { Send, Square, FileText, Compass, AlertCircle, Server, Upload, FolderOpen, Settings } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import clsx from 'clsx';
 import { useChatStore, type ExplorationStep, type ChatMessage } from '../../stores/chat';
 import { useDocumentsStore } from '../../stores/documents';
 import { useSettingsStore } from '../../stores/settings';
-import { chatWithAgent, abortQuery } from '../../lib/tauri';
+import { chatWithAgent, abortQuery, type ChatEvent } from '../../lib/tauri';
 import { ThinkingBlock } from './ThinkingBlock';
 import styles from './ChatPanel.module.css';
 
-interface ExplorationStepPayload {
-  stepNumber: number;
-  tool: string;
-  inputSummary: string;
+interface ChatPanelProps {
+  onOpenSettings?: () => void;
+  onOpenDocs?: () => void;
 }
 
-interface ExplorationStepCompletePayload {
-  stepNumber: number;
-  outputSummary: string;
-  tokensUsed: number;
-  latencyMs: number;
-  cost: number;
-  nodeIds: string[];
-}
-
-interface ChatResponsePayload {
-  content: string;
-}
-
-interface ChatErrorPayload {
-  error: string;
-}
-
-export function ChatPanel() {
+export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -47,84 +28,75 @@ export function ChatPanel() {
     explorationSteps,
     isExploring,
     activeConversationId,
+    conversationDocIds,
     addMessage,
     createConversation,
     addExplorationStep,
     updateStepStatus,
     setIsExploring,
     clearSteps,
+    addDocToActiveConversation,
   } = useChatStore();
 
-  const { documents, activeDocumentId, selectedDocumentIds, setActiveDocument, ingestDocumentFromPath } = useDocumentsStore();
+  const { documents, ingestDocumentFromPath } = useDocumentsStore();
   const { providers, activeProviderId } = useSettingsStore();
 
   const activeProvider = providers.find((p) => p.id === activeProviderId);
 
-  // Listen for Tauri events
-  // Store listener promises so cleanup can unlisten even if setup hasn't finished
-  useEffect(() => {
-    const listenerPromises: Promise<UnlistenFn>[] = [];
+  const streamingContentRef = useRef('');
+  const [streamingContent, setStreamingContent] = useState<string | null>(null);
 
-    try {
-      listenerPromises.push(
-        listen<ExplorationStepPayload>('exploration-step-start', (event) => {
-          const payload = event.payload;
-          const step: ExplorationStep = {
-            stepNumber: payload.stepNumber,
-            tool: payload.tool,
-            inputSummary: payload.inputSummary,
-            outputSummary: '',
-            tokensUsed: 0,
-            latencyMs: 0,
-            cost: 0,
-            status: 'running',
-          };
-          addExplorationStep(step);
-        })
-      );
-
-      listenerPromises.push(
-        listen<ExplorationStepCompletePayload>('exploration-step-complete', (event) => {
-          const payload = event.payload;
-          updateStepStatus(payload.stepNumber, 'complete', payload.outputSummary, payload.nodeIds, payload.tokensUsed, payload.latencyMs, payload.cost);
-        })
-      );
-
-      listenerPromises.push(
-        listen<ChatResponsePayload>('chat-response', (event) => {
-          const msg: ChatMessage = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-            role: 'assistant',
-            content: event.payload.content,
-            createdAt: new Date().toISOString(),
-          };
-          addMessage(msg);
-          setIsExploring(false);
-        })
-      );
-
-      listenerPromises.push(
-        listen<ChatErrorPayload>('chat-error', (event) => {
-          setSendError(event.payload.error);
-          setIsExploring(false);
-        })
-      );
-    } catch (err) {
-      console.warn('Tauri event listeners not available:', err);
+  const handleChatEvent = useCallback((event: ChatEvent) => {
+    switch (event.type) {
+      case 'step-start': {
+        const step: ExplorationStep = {
+          stepNumber: event.stepNumber,
+          tool: event.tool,
+          inputSummary: event.inputSummary,
+          outputSummary: '',
+          tokensUsed: 0,
+          latencyMs: 0,
+          cost: 0,
+          status: 'running',
+        };
+        addExplorationStep(step);
+        break;
+      }
+      case 'step-complete':
+        updateStepStatus(event.stepNumber, 'complete', event.outputSummary, event.nodeIds, event.tokensUsed, event.latencyMs, event.cost);
+        break;
+      case 'token':
+        if (!event.done) {
+          streamingContentRef.current += event.token;
+          setStreamingContent(streamingContentRef.current);
+        }
+        break;
+      case 'response': {
+        const msg: ChatMessage = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          role: 'assistant',
+          content: event.content,
+          createdAt: new Date().toISOString(),
+        };
+        addMessage(msg);
+        setIsExploring(false);
+        streamingContentRef.current = '';
+        setStreamingContent(null);
+        break;
+      }
+      case 'error':
+        setSendError(event.error);
+        setIsExploring(false);
+        streamingContentRef.current = '';
+        setStreamingContent(null);
+        break;
     }
-
-    return () => {
-      // Each promise resolves to an unlisten function — call it when resolved
-      listenerPromises.forEach((p) => p.then((unlisten) => unlisten()).catch(() => {}));
-    };
   }, [addExplorationStep, updateStepStatus, addMessage, setIsExploring]);
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, explorationSteps]);
+  }, [messages, explorationSteps, streamingContent]);
 
-  // Auto-grow textarea
   useEffect(() => {
     const textarea = textareaRef.current;
     if (textarea) {
@@ -137,14 +109,10 @@ export function ChatPanel() {
     const trimmed = input.trim();
     if (!trimmed) return;
 
-    // Build doc IDs array for multi-document queries
-    const docIds = selectedDocumentIds.length > 0
-      ? selectedDocumentIds
-      : activeDocumentId ? [activeDocumentId] : [];
+    const docIds = [...conversationDocIds];
 
-    // Validate prerequisites
     if (docIds.length === 0) {
-      setSendError('Please select a document first.');
+      setSendError('No documents attached to this chat. Add a document first.');
       return;
     }
 
@@ -155,13 +123,14 @@ export function ChatPanel() {
 
     setSendError(null);
 
-    // Create conversation if none exists
     let convId = activeConversationId;
     if (!convId) {
-      convId = createConversation(trimmed.slice(0, 40), activeDocumentId ?? undefined);
+      convId = createConversation(trimmed.slice(0, 40));
+      for (const docId of docIds) {
+        await addDocToActiveConversation(docId);
+      }
     }
 
-    // Add user message to store
     addMessage({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       role: 'user',
@@ -174,12 +143,11 @@ export function ChatPanel() {
       textareaRef.current.style.height = 'auto';
     }
 
-    // Begin exploration
     setIsExploring(true);
     clearSteps();
 
     try {
-      await chatWithAgent(trimmed, docIds, activeProviderId, convId ?? undefined);
+      await chatWithAgent(trimmed, docIds, activeProviderId, handleChatEvent, convId ?? undefined);
     } catch (err) {
       setSendError(String(err));
       setIsExploring(false);
@@ -193,7 +161,6 @@ export function ChatPanel() {
     }
   };
 
-  // Drag-and-drop handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(true);
@@ -212,14 +179,21 @@ export function ChatPanel() {
       const file = files[0];
       const filePath = (file as any).path || file.name;
       if (filePath) {
-        await ingestDocumentFromPath(filePath);
+        const summary = await ingestDocumentFromPath(filePath);
+        if (summary) {
+          await addDocToActiveConversation(summary.id);
+        }
       }
     }
   };
 
+  const convDocNames = conversationDocIds
+    .map((id) => documents.find((d) => d.id === id)?.name)
+    .filter(Boolean);
+
   const hasContent = messages.length > 0 || explorationSteps.length > 0;
   const noProvider = providers.length === 0;
-  const noDocument = documents.length === 0;
+  const noDocs = conversationDocIds.length === 0;
 
   return (
     <div
@@ -231,165 +205,177 @@ export function ChatPanel() {
       {isDragOver && (
         <div className={styles.dropOverlay}>
           <Upload size={24} />
-          <span>Drop file to start exploring</span>
+          <span>Drop file to add to this chat</span>
         </div>
       )}
-      {/* Messages area */}
+
+      {/* Messages area — centered column */}
       <div className={styles.messages}>
-        {!hasContent ? (
-          <div className={styles.empty}>
-            <Compass size={40} className={styles.emptyIcon} />
-            <h3 className={styles.emptyTitle}>Drop a document and start exploring</h3>
-            <p className={styles.emptySubtitle}>
-              Add a document, then ask questions to navigate its contents with AI
-            </p>
-            {noProvider && (
-              <div className={styles.emptyWarning}>
-                <AlertCircle size={14} />
-                <span>No LLM provider configured. Open Settings to add one.</span>
+        <div className={styles.messagesInner}>
+          {!hasContent ? (
+            <div className={styles.empty}>
+              <div className={styles.emptyIconWrap}>
+                <Compass size={32} />
               </div>
-            )}
-            {noDocument && !noProvider && (
-              <div className={styles.emptyWarning}>
-                <AlertCircle size={14} />
-                <span>No documents loaded. Add a document from the sidebar.</span>
+              <h3 className={styles.emptyTitle}>
+                Start exploring
+              </h3>
+              <p className={styles.emptySubtitle}>
+                {!activeConversationId
+                  ? 'Create a new chat from the top bar, then add documents to explore'
+                  : noDocs
+                    ? 'Add documents and ask questions \u2014 I\'ll navigate the structure to find answers'
+                    : 'Add documents and ask questions \u2014 I\'ll navigate the structure to find answers'}
+              </p>
+              <div className={styles.emptyActions}>
+                {noProvider && onOpenSettings && (
+                  <button type="button" className={styles.emptyAction} onClick={onOpenSettings}>
+                    <Settings size={14} />
+                    <span>Configure Provider</span>
+                  </button>
+                )}
+                {noDocs && activeConversationId && onOpenDocs && (
+                  <button type="button" className={styles.emptyAction} onClick={onOpenDocs}>
+                    <FolderOpen size={14} />
+                    <span>Add Documents</span>
+                  </button>
+                )}
               </div>
-            )}
-          </div>
-        ) : (
-          <>
-            {(() => {
-              // Find last user message index to insert steps after it
-              const lastUserIdx = messages.reduce(
-                (acc, msg, i) => (msg.role === 'user' ? i : acc),
-                -1,
-              );
+            </div>
+          ) : (
+            <>
+              {(() => {
+                const lastUserIdx = messages.reduce(
+                  (acc, msg, i) => (msg.role === 'user' ? i : acc),
+                  -1,
+                );
 
-              return messages.map((msg, i) => (
-                <Fragment key={msg.id}>
-                  <div
-                    className={clsx(
-                      styles.message,
-                      msg.role === 'user' ? styles.messageUser : styles.messageAssistant
-                    )}
-                  >
-                    <div
-                      className={clsx(
-                        styles.bubble,
-                        msg.role === 'user' ? styles.bubbleUser : styles.bubbleAssistant
-                      )}
-                    >
-                      {msg.role === 'assistant' ? (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>{msg.content}</ReactMarkdown>
-                      ) : (
-                        msg.content
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Show exploration steps right after the last user message */}
-                  {i === lastUserIdx && (
-                    <>
-                      {explorationSteps.map((step) => (
-                        <div key={step.stepNumber} className={styles.stepWrapper}>
-                          <ThinkingBlock step={step} />
+                return messages.map((msg, i) => (
+                  <Fragment key={msg.id}>
+                    {msg.role === 'user' ? (
+                      <div className={styles.userRow}>
+                        <div className={styles.userBubble}>
+                          {msg.content}
                         </div>
-                      ))}
+                      </div>
+                    ) : (
+                      <div className={styles.assistantRow}>
+                        <div className={styles.assistantContent}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
+                    )}
 
-                      {isExploring && explorationSteps.length === 0 && (
-                        <div className={styles.stepWrapper}>
+                    {i === lastUserIdx && (
+                      <>
+                        {explorationSteps.length > 0 && (
+                          <div className={styles.stepsGroup}>
+                            {explorationSteps.map((step) => (
+                              <ThinkingBlock key={step.stepNumber} step={step} />
+                            ))}
+                          </div>
+                        )}
+
+                        {isExploring && explorationSteps.length === 0 && !streamingContent && (
                           <div className={styles.exploringIndicator}>
                             <span className={styles.exploringDot} />
-                            <span>Exploring document...</span>
+                            <span>Analyzing document...</span>
                           </div>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </Fragment>
-              ));
-            })()}
-          </>
-        )}
+                        )}
 
-        {sendError && (
-          <div className={styles.errorMessage}>
-            <AlertCircle size={14} />
-            <span>{sendError}</span>
-          </div>
-        )}
+                        {streamingContent && (
+                          <div className={styles.assistantRow}>
+                            <div className={clsx(styles.assistantContent, styles.streaming)}>
+                              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+                                {streamingContent}
+                              </ReactMarkdown>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </Fragment>
+                ));
+              })()}
+            </>
+          )}
 
-        <div ref={messagesEndRef} />
+          {sendError && (
+            <div className={styles.errorMessage}>
+              <AlertCircle size={14} />
+              <span>{sendError}</span>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      {/* Input bar */}
-      <div className={styles.inputBar}>
-        <div className={styles.inputMeta}>
-          {documents.length > 0 && (
-            <div className={styles.docSelector}>
-              <FileText size={14} className={styles.docSelectorIcon} />
-              <select
-                className={styles.docSelect}
-                value={activeDocumentId ?? ''}
-                onChange={(e) => setActiveDocument(e.target.value || null)}
-                aria-label="Select document"
-                title="Select document"
+      {/* Floating input bar */}
+      <div className={styles.inputBarWrap}>
+        <div className={styles.inputBar}>
+          <div className={styles.inputMeta}>
+            {convDocNames.length > 0 && (
+              <button type="button" className={styles.docChip} onClick={onOpenDocs}>
+                <FileText size={12} />
+                <span>
+                  {convDocNames.length === 1
+                    ? convDocNames[0]
+                    : `${convDocNames.length} documents`}
+                </span>
+              </button>
+            )}
+            {activeProvider && (
+              <div className={styles.providerChip}>
+                <Server size={10} />
+                <span>{activeProvider.name}/{activeProvider.model}</span>
+              </div>
+            )}
+          </div>
+
+          <div className={styles.inputRow}>
+            <textarea
+              ref={textareaRef}
+              className={styles.textarea}
+              placeholder={
+                noProvider
+                  ? 'Configure a provider in Settings first...'
+                  : !activeConversationId
+                    ? 'Create a new chat to get started...'
+                    : noDocs
+                      ? 'Add a document to this chat first...'
+                      : 'Ask about your documents...'
+              }
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={1}
+              aria-label="Message input"
+              disabled={isExploring || !activeConversationId}
+            />
+            {isExploring ? (
+              <button
+                type="button"
+                className={clsx(styles.sendBtn, styles.stopBtn)}
+                onClick={() => abortQuery().catch(() => {})}
+                title="Stop query"
               >
-                <option value="">No document</option>
-                {documents.map((doc) => (
-                  <option key={doc.id} value={doc.id}>
-                    {doc.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {activeProvider && (
-            <div className={styles.providerBadge}>
-              <Server size={12} />
-              <span>{activeProvider.name}/{activeProvider.model}</span>
-            </div>
-          )}
-        </div>
-
-        <div className={styles.inputRow}>
-          <textarea
-            ref={textareaRef}
-            className={styles.textarea}
-            placeholder={
-              noProvider
-                ? 'Configure a provider in Settings first...'
-                : noDocument
-                  ? 'Add a document to get started...'
-                  : 'Ask about your document...'
-            }
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-            disabled={isExploring}
-          />
-          {isExploring ? (
-            <button
-              type="button"
-              className={clsx(styles.sendButton, styles.stopButton)}
-              onClick={() => abortQuery().catch(() => {})}
-              title="Stop query"
-            >
-              <Square size={16} fill="currentColor" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className={clsx(styles.sendButton, input.trim() && styles.sendButtonActive)}
-              onClick={handleSend}
-              disabled={!input.trim()}
-              title="Send message"
-            >
-              <Send size={18} />
-            </button>
-          )}
+                <Square size={14} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={clsx(styles.sendBtn, input.trim() && styles.sendBtnActive)}
+                onClick={handleSend}
+                disabled={!input.trim()}
+                title="Send message (Enter)"
+              >
+                <Send size={16} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

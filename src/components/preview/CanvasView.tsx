@@ -2,9 +2,9 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Network, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import { useDocumentsStore } from '../../stores/documents';
 import { useChatStore } from '../../stores/chat';
-import { getDocument } from '../../lib/tauri';
-import type { DocumentTree, TreeNode } from '../../lib/tauri';
-import sharedStyles from './PreviewPanel.module.css';
+import { getDocument, getCrossDocRelations } from '../../lib/tauri';
+import type { DocumentTree, TreeNode, CrossDocRelation } from '../../lib/tauri';
+import sharedStyles from './shared.module.css';
 import styles from './CanvasView.module.css';
 
 /** Color for each node type */
@@ -111,7 +111,9 @@ export function CanvasView() {
   const visitedNodeIds = useChatStore((s) => s.visitedNodeIds);
   const activeNodeId = useChatStore((s) => s.activeNodeId);
   const visitedSet = useMemo(() => new Set(visitedNodeIds), [visitedNodeIds]);
+  const conversationDocIds = useChatStore((s) => s.conversationDocIds);
   const [tree, setTree] = useState<DocumentTree | null>(null);
+  const [relations, setRelations] = useState<CrossDocRelation[]>([]);
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -130,6 +132,19 @@ export function CanvasView() {
       .catch((err: unknown) => { if (!cancelled) { console.warn('CanvasView:', err); setTree(null); } });
     return () => { cancelled = true; };
   }, [activeDocumentId]);
+
+  // Load cross-doc relations
+  useEffect(() => {
+    const docIds = conversationDocIds.length > 0
+      ? conversationDocIds
+      : activeDocumentId ? [activeDocumentId] : [];
+    if (docIds.length === 0) { setRelations([]); return; }
+    let cancelled = false;
+    getCrossDocRelations(docIds)
+      .then((rels) => { if (!cancelled) setRelations(rels); })
+      .catch(() => { if (!cancelled) setRelations([]); });
+    return () => { cancelled = true; };
+  }, [conversationDocIds, activeDocumentId]);
 
   // Build layout
   const { layoutNodes, edges, treeBounds } = useMemo(() => {
@@ -329,6 +344,22 @@ export function CanvasView() {
               const midY = (edge.y1 + edge.y2) / 2;
               const d = `M ${edge.x1} ${edge.y1} C ${edge.x1} ${midY}, ${edge.x2} ${midY}, ${edge.x2} ${edge.y2}`;
               return <path key={i} d={d} className={styles.edge} />;
+            })}
+
+            {/* Cross-doc relation edges (dashed) */}
+            {relations.map((rel) => {
+              const srcNode = layoutNodes.find((n) => n.id === rel.source_node_id);
+              const tgtNode = layoutNodes.find((n) => n.id === rel.target_node_id);
+              if (!srcNode || !tgtNode) return null;
+              const midY = (srcNode.y + tgtNode.y) / 2;
+              const d = `M ${srcNode.x} ${srcNode.y} C ${srcNode.x} ${midY}, ${tgtNode.x} ${midY}, ${tgtNode.x} ${tgtNode.y}`;
+              return (
+                <path
+                  key={`rel-${rel.id}`}
+                  d={d}
+                  className={styles.relationEdge}
+                />
+              );
             })}
 
             {layoutNodes.map((ln) => {

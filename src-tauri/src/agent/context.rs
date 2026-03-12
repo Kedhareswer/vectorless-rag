@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+// NOTE: Scaffolding for future ReAct agent loop. Not called by live code.
+#![allow(dead_code)]
+
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct ExplorationContext {
-    pub explored_nodes: Vec<String>,
+    pub explored_nodes: HashSet<String>,
     pub summaries: HashMap<String, String>,
     /// How many times each node was accessed (visit frequency)
     pub visit_counts: HashMap<String, u32>,
@@ -16,7 +19,7 @@ pub struct ExplorationContext {
 impl ExplorationContext {
     pub fn new(max_steps: u32) -> Self {
         Self {
-            explored_nodes: Vec::new(),
+            explored_nodes: HashSet::new(),
             summaries: HashMap::new(),
             visit_counts: HashMap::new(),
             step_count: 0,
@@ -27,9 +30,7 @@ impl ExplorationContext {
     }
 
     pub fn record_step(&mut self, node_id: &str, summary: &str, tokens: u32) {
-        if !self.explored_nodes.contains(&node_id.to_string()) {
-            self.explored_nodes.push(node_id.to_string());
-        }
+        self.explored_nodes.insert(node_id.to_string());
         *self.visit_counts.entry(node_id.to_string()).or_insert(0) += 1;
         self.summaries.insert(node_id.to_string(), summary.to_string());
         self.step_count += 1;
@@ -37,7 +38,7 @@ impl ExplorationContext {
     }
 
     pub fn has_explored(&self, node_id: &str) -> bool {
-        self.explored_nodes.contains(&node_id.to_string())
+        self.explored_nodes.contains(node_id)
     }
 
     pub fn budget_remaining(&self) -> u32 {
@@ -79,10 +80,11 @@ impl ExplorationContext {
         ));
 
         if !self.explored_nodes.is_empty() {
+            let node_list: Vec<&str> = self.explored_nodes.iter().map(|s| s.as_str()).collect();
             parts.push(format!(
                 "Explored {} nodes: {}",
                 self.explored_nodes.len(),
-                self.explored_nodes.join(", ")
+                node_list.join(", ")
             ));
         }
 

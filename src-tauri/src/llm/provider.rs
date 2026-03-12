@@ -118,6 +118,22 @@ pub trait LLMProvider: Send + Sync {
         tools: Option<Vec<Tool>>,
     ) -> Result<LLMResponse, LLMError>;
 
+    /// Streaming variant of `chat`. Sends content tokens via `token_tx` as they
+    /// arrive from the LLM. Returns the complete `LLMResponse` when done.
+    /// Default implementation falls back to non-streaming `chat()`.
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<Tool>>,
+        token_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<LLMResponse, LLMError> {
+        let response = self.chat(messages, tools).await?;
+        if let Some(ref content) = response.content {
+            let _ = token_tx.send(content.clone());
+        }
+        Ok(response)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities;
 
     fn name(&self) -> &str;

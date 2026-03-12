@@ -1,0 +1,107 @@
+.topBar {
+  display: flex;
+  align-items: center;
+  height: var(--topbar-height);
+  padding: 0 var(--space-4);
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: var(--space-3);
+  z-index: 10;
+  -webkit-app-region: drag;
+}
+
+.topBar > * {
+  -webkit-app-region: no-drag;
+}
+
+/* Menu / conversation switcher trigger */
+.menuButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.menuButton:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.menuButton:active {
+  transform: scale(0.95);
+}
+
+/* Chat title */
+.chatTitle {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.chatTitleEmpty {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+/* Right-side icon buttons */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.iconBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  position: relative;
+}
+
+.iconBtn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-hover);
+}
+
+.iconBtn:active {
+  transform: scale(0.95);
+}
+
+.iconBtnActive {
+  color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.iconBtnActive:hover {
+  background-color: var(--accent-muted);
+}
+
+/* Divider between icon groups */
+.divider {
+  width: 1px;
+  height: 16px;
+  background-color: var(--border);
+  flex-shrink: 0;
+}

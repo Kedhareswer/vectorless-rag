@@ -1,15 +1,17 @@
 /* ============================================
    TGG — Design Tokens & Global Styles
-   Claude Desktop-inspired warm aesthetic
+   Raycast-inspired, compact power-user aesthetic
+   Warm peach/coral accent on warm neutrals
    ============================================ */
 
 :root {
-  /* Background */
-  --bg-primary: #F4F3EE;
+  /* Backgrounds */
+  --bg-primary: #FAFAF8;
   --bg-secondary: #FFFFFF;
-  --bg-sidebar: #EDEAE3;
-  --bg-surface: #FAF8F4;
-  --bg-hover: #E8E4DB;
+  --bg-elevated: #FFFFFF;
+  --bg-sidebar: #F5F4F0;
+  --bg-surface: #F0EEEA;
+  --bg-hover: #EAE8E3;
 
   /* Text */
   --text-primary: #1C1917;
@@ -18,59 +20,104 @@
 
   /* Accent */
   --accent: #DE7356;
-  --accent-hover: #C15F3C;
-  --accent-soft: #FBE8E0;
+  --accent-hover: #C85A3A;
+  --accent-soft: rgba(222, 115, 86, 0.08);
+  --accent-muted: rgba(222, 115, 86, 0.12);
+  --accent-text: #B84D2E;
 
   /* Borders & Shadows */
-  --border: #E7E5E0;
-  --border-light: #F0EDE7;
+  --border: #E5E2DC;
+  --border-light: #EDEBE6;
+  --border-strong: #D5D0C8;
+  --shadow-sm: 0 1px 2px rgba(28, 25, 23, 0.06);
   --shadow: 0 1px 3px rgba(28, 25, 23, 0.06);
   --shadow-md: 0 4px 12px rgba(28, 25, 23, 0.08);
+  --shadow-lg: 0 8px 24px rgba(28, 25, 23, 0.1);
+  --shadow-overlay: 0 12px 40px rgba(28, 25, 23, 0.15);
 
   /* Status */
-  --success: #22C55E;
-  --warning: #EAB308;
-  --error: #EF4444;
+  --success: #4ADE80;
+  --warning: #FBBF24;
+  --error: #F87171;
+  --info: #60A5FA;
   --trace-blue: #3B82F6;
+
+  /* Typography */
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --line-height-tight: 1.3;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.6;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 24px;
+  --space-7: 32px;
 
   /* Radii */
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
 
   /* Transitions */
-  --transition-fast: 150ms ease;
-  --transition-normal: 200ms ease;
+  --transition-fast: 100ms ease;
+  --transition-normal: 150ms ease;
+  --transition-slow: 200ms ease-out;
+
+  /* Layout */
+  --topbar-height: 40px;
+  --input-bar-margin: 16px;
+  --chat-max-width: 720px;
+  --panel-width: 380px;
 }
 
 [data-theme="dark"] {
-  /* Background */
-  --bg-primary: #1C1917;
-  --bg-secondary: #282420;
-  --bg-sidebar: #231F1B;
-  --bg-surface: #2E2A25;
-  --bg-hover: #3D3730;
+  /* Backgrounds */
+  --bg-primary: #141210;
+  --bg-secondary: #1C1A17;
+  --bg-elevated: #252220;
+  --bg-sidebar: #1A1816;
+  --bg-surface: #1E1C19;
+  --bg-hover: #2E2B27;
 
   /* Text */
-  --text-primary: #F4F3EE;
-  --text-secondary: #A8A29E;
-  --text-tertiary: #78716C;
+  --text-primary: #F0EDE8;
+  --text-secondary: #9C9590;
+  --text-tertiary: #6B6560;
 
   /* Accent */
   --accent: #DE7356;
   --accent-hover: #E8845E;
-  --accent-soft: #3D2920;
+  --accent-soft: rgba(222, 115, 86, 0.12);
+  --accent-muted: rgba(222, 115, 86, 0.16);
+  --accent-text: #F4A58E;
 
   /* Borders & Shadows */
-  --border: #3D3730;
-  --border-light: #332E28;
+  --border: #3A3632;
+  --border-light: #302C28;
+  --border-strong: #4A4540;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.3);
+  --shadow-overlay: 0 12px 40px rgba(0, 0, 0, 0.4);
 
   /* Status */
-  --success: #22C55E;
-  --warning: #EAB308;
-  --error: #EF4444;
+  --success: #4ADE80;
+  --warning: #FBBF24;
+  --error: #F87171;
+  --info: #60A5FA;
   --trace-blue: #60A5FA;
 }
 
@@ -87,9 +134,9 @@
 }
 
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--line-height-normal);
   color: var(--text-primary);
   background-color: var(--bg-primary);
   -webkit-font-smoothing: antialiased;
@@ -101,11 +148,11 @@ body {
 code,
 pre,
 .mono {
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: var(--font-mono);
 }
 
 /* ============================================
-   Scrollbar
+   Scrollbar — Thin, always visible
    ============================================ */
 
 ::-webkit-scrollbar {
@@ -136,43 +183,78 @@ pre,
 }
 
 /* ============================================
+   Focus — keyboard only
+   ============================================ */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ============================================
    Animations
    ============================================ */
 
 @keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes pulseDot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.7; }
 }
 
 @keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(100%); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slideOutRight {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(100%); }
 }
 
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 @keyframes glow {
-  0%, 100% {
-    box-shadow: 0 0 4px var(--accent);
-  }
-  50% {
-    box-shadow: 0 0 12px var(--accent);
-  }
+  0%, 100% { box-shadow: 0 0 4px var(--accent); }
+  50% { box-shadow: 0 0 12px var(--accent); }
 }

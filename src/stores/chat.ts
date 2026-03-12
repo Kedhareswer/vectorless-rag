@@ -7,6 +7,9 @@ import {
   deleteConversationIPC,
   getTraces,
   getSteps,
+  addDocToConversation,
+  removeDocFromConversation,
+  getConversationDocIds,
 } from '../lib/tauri';
 import { useDocumentsStore } from './documents';
 
@@ -15,6 +18,8 @@ export interface Conversation {
   title: string;
   docId: string | null;
   createdAt: string;
+  /** Number of documents attached to this conversation */
+  docCount?: number;
 }
 
 export interface ChatMessage {
@@ -61,6 +66,10 @@ interface ChatState {
   sessionSteps: ExplorationStep[];
   /** Whether session totals are being loaded from DB */
   isLoadingSession: boolean;
+  /** Document IDs attached to the active conversation */
+  conversationDocIds: string[];
+  /** Incremented after each query completes so RelationsView can re-fetch */
+  relationsVersion: number;
 
   createConversation: (title: string, docId?: string) => string;
   setActiveConversation: (id: string | null) => void;
@@ -73,6 +82,12 @@ interface ChatState {
   loadMessages: (convId: string) => Promise<void>;
   deleteConversation: (convId: string) => Promise<void>;
   loadSessionTotals: (convId: string) => Promise<void>;
+  /** Attach a document to the active conversation */
+  addDocToActiveConversation: (docId: string) => Promise<void>;
+  /** Detach a document from the active conversation */
+  removeDocFromActiveConversation: (docId: string) => Promise<void>;
+  /** Load doc IDs for a conversation from backend */
+  loadConversationDocIds: (convId: string) => Promise<void>;
 }
 
 function generateId(): string {
@@ -90,6 +105,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 },
   sessionSteps: [],
   isLoadingSession: false,
+  conversationDocIds: [],
+  relationsVersion: 0,
 
   createConversation: (title: string, docId?: string) => {
     const id = generateId();
@@ -98,6 +115,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       title,
       docId: docId ?? null,
       createdAt: new Date().toISOString(),
+      docCount: 0,
     };
     set((state) => ({
       conversations: [conversation, ...state.conversations],
@@ -108,6 +126,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeNodeId: null,
       sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 },
       sessionSteps: [],
+      conversationDocIds: [],
     }));
     // Persist to backend (fire-and-forget)
     saveConversationIPC(id, title, docId ?? null).catch((err) =>
@@ -126,15 +145,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 },
       sessionSteps: [],
       isLoadingSession: !!id,
+      conversationDocIds: [],
     });
-
-    // Restore document association from conversation
-    const conv = id ? get().conversations.find((c) => c.id === id) : null;
-    useDocumentsStore.getState().setActiveDocument(conv?.docId ?? null);
 
     if (id) {
       get().loadMessages(id);
       get().loadSessionTotals(id);
+      get().loadConversationDocIds(id);
+    } else {
+      // No active conversation — clear document selection
+      useDocumentsStore.getState().setActiveDocument(null);
     }
   },
 
@@ -185,10 +205,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setIsExploring: (exploring: boolean) => {
-    set({
+    set((state) => ({
       isExploring: exploring,
-      ...(exploring ? {} : { activeNodeId: null }),
-    });
+      ...(exploring
+        ? {}
+        : { activeNodeId: null, relationsVersion: state.relationsVersion + 1 }),
+    }));
   },
 
   clearSteps: () => {
@@ -219,12 +241,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadConversations: async () => {
     try {
       const records = await listConversations();
-      const conversations: Conversation[] = records.map((r) => ({
-        id: r.id,
-        title: r.title,
-        docId: r.doc_id,
-        createdAt: r.created_at,
-      }));
+      // Load doc counts for each conversation
+      const conversations: Conversation[] = [];
+      for (const r of records) {
+        let docCount = 0;
+        try {
+          const docIds = await getConversationDocIds(r.id);
+          docCount = docIds.length;
+        } catch { /* ignore */ }
+        conversations.push({
+          id: r.id,
+          title: r.title,
+          docId: r.doc_id,
+          createdAt: r.created_at,
+          docCount,
+        });
+      }
       set({ conversations });
     } catch (err) {
       console.warn('Failed to load conversations:', err);
@@ -254,7 +286,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((state) => ({
         conversations: state.conversations.filter((c) => c.id !== convId),
         ...(state.activeConversationId === convId
-          ? { activeConversationId: null, messages: [], explorationSteps: [], visitedNodeIds: [], activeNodeId: null, sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 }, sessionSteps: [] }
+          ? { activeConversationId: null, messages: [], explorationSteps: [], visitedNodeIds: [], activeNodeId: null, sessionTotals: { tokens: 0, cost: 0, latency: 0, steps: 0 }, sessionSteps: [], conversationDocIds: [] }
           : {}),
       }));
     } catch (err) {
@@ -311,6 +343,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       console.warn('Failed to load session totals:', err);
       set({ isLoadingSession: false });
+    }
+  },
+
+  addDocToActiveConversation: async (docId: string) => {
+    const convId = get().activeConversationId;
+    if (!convId) return;
+
+    try {
+      await addDocToConversation(convId, docId);
+      set((state) => {
+        if (state.conversationDocIds.includes(docId)) return state;
+        const newDocIds = [...state.conversationDocIds, docId];
+        // Update doc count on the conversation entry
+        const conversations = state.conversations.map((c) =>
+          c.id === convId ? { ...c, docCount: newDocIds.length } : c
+        );
+        return { conversationDocIds: newDocIds, conversations };
+      });
+    } catch (err) {
+      console.warn('Failed to add doc to conversation:', err);
+    }
+  },
+
+  removeDocFromActiveConversation: async (docId: string) => {
+    const convId = get().activeConversationId;
+    if (!convId) return;
+
+    try {
+      await removeDocFromConversation(convId, docId);
+      set((state) => {
+        const newDocIds = state.conversationDocIds.filter((id) => id !== docId);
+        const conversations = state.conversations.map((c) =>
+          c.id === convId ? { ...c, docCount: newDocIds.length } : c
+        );
+        return { conversationDocIds: newDocIds, conversations };
+      });
+    } catch (err) {
+      console.warn('Failed to remove doc from conversation:', err);
+    }
+  },
+
+  loadConversationDocIds: async (convId: string) => {
+    try {
+      const docIds = await getConversationDocIds(convId);
+      if (get().activeConversationId !== convId) return;
+      set({ conversationDocIds: docIds });
+      // Set the first doc as active for the preview panel
+      if (docIds.length > 0) {
+        useDocumentsStore.getState().setActiveDocument(docIds[0]);
+      }
+    } catch (err) {
+      console.warn('Failed to load conversation doc IDs:', err);
     }
   },
 }));

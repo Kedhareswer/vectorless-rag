@@ -29,7 +29,7 @@
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
-  font-family: inherit;
+  font-family: var(--font-ui);
 }
 
 .scopeBtn:hover {
@@ -52,7 +52,6 @@
   padding: 8px 10px;
   border-bottom: 1px solid var(--border-light);
   flex-shrink: 0;
-  background-color: var(--bg-surface, var(--bg-secondary));
 }
 
 .statCard {
@@ -68,13 +67,13 @@
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-tertiary);
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .statValue {
-  font-size: 13px;
+  font-size: var(--text-base);
   font-weight: 600;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   color: var(--text-primary);
   line-height: 1.2;
   white-space: nowrap;
@@ -82,7 +81,7 @@
   text-overflow: ellipsis;
 }
 
-/* Empty state — compact, not a giant placeholder */
+/* Empty state */
 
 .emptyState {
   display: flex;
@@ -90,7 +89,7 @@
   gap: 8px;
   padding: 12px 14px;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .emptyIcon {
@@ -147,7 +146,7 @@
   color: #ffffff;
   font-size: 10px;
   font-weight: 600;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   flex-shrink: 0;
   position: relative;
   z-index: 1;
@@ -174,7 +173,7 @@
 
 .toolName {
   font-weight: 600;
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-primary);
 }
 
@@ -186,7 +185,7 @@
   height: 7px;
   border-radius: 50%;
   background-color: var(--accent);
-  animation: pulse 1.5s ease infinite;
+  animation: pulseDot 1.5s ease-in-out infinite;
   flex-shrink: 0;
 }
 
@@ -206,21 +205,21 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   font-size: 10px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: var(--font-mono);
   font-weight: 500;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   background-color: var(--bg-hover);
   padding: 1px 5px;
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
   white-space: nowrap;
 }
 
 /* Input / Output summaries */
 
 .summary {
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--text-secondary);
   line-height: 1.4;
   overflow: hidden;
@@ -243,13 +242,4 @@
   text-transform: uppercase;
   letter-spacing: 0.3px;
   margin-top: 1px;
-}
-
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
 }
