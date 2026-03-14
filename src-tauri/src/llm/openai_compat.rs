@@ -203,7 +203,7 @@ impl LLMProvider for OpenAICompatProvider {
         let byte_stream = response.bytes_stream();
         use futures_util::StreamExt;
         let reader = tokio_util::io::StreamReader::new(
-            byte_stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+            byte_stream.map(|r| r.map_err(std::io::Error::other)),
         );
         let mut lines = reader.lines();
 

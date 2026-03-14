@@ -377,7 +377,7 @@ fn tool_tree_overview(args: &serde_json::Value, trees: &[DocumentTree]) -> serde
 
     let documents: Vec<serde_json::Value> = trees
         .iter()
-        .filter(|t| filter_doc_id.map_or(true, |id| t.id == id))
+        .filter(|t| filter_doc_id.is_none_or(|id| t.id == id))
         .map(|tree| {
             let sections: Vec<serde_json::Value> = tree
                 .rich_overview()

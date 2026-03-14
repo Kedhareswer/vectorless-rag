@@ -569,7 +569,7 @@ pub async fn describe_image(
 /// Simple base64 encoder — avoids pulling in a separate crate.
 fn base64_encode(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -643,6 +643,7 @@ pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, S
 
 // --- Agent chat command ---
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn chat_with_agent(
     db: State<'_, Database>,

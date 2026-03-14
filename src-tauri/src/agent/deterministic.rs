@@ -161,7 +161,7 @@ fn fetch_summarize(
                         let grandchildren = tree.get_children(&child.id);
                         for gc in &grandchildren {
                             if !gc.content.is_empty() {
-                                text.push_str("\n");
+                                text.push('\n');
                                 text.push_str(&gc.content);
                             }
                         }
@@ -416,7 +416,7 @@ fn fetch_list_extract(
                 let children = tree.get_children(node_id);
                 for child in &children {
                     if !child.content.is_empty() {
-                        content.push_str("\n");
+                        content.push('\n');
                         content.push_str(&child.content);
                     }
                 }

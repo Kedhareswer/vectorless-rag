@@ -122,7 +122,7 @@ fn extractive_summary(content: &str) -> String {
 
     // Split into sentences (simple heuristic)
     let sentences: Vec<&str> = truncated
-        .split(|c: char| c == '.' || c == '!' || c == '?')
+        .split(['.', '!', '?'])
         .map(|s| s.trim())
         .filter(|s| s.len() > 15) // skip very short fragments
         .collect();
@@ -171,7 +171,7 @@ fn extract_entities(content: &str) -> Vec<String> {
         let w1_clean = window[1].trim_matches(|c: char| !c.is_alphanumeric());
 
         // "January 2025"
-        if months.contains(&&*w0_clean) && w1_clean.len() == 4 && w1_clean.chars().all(|c| c.is_ascii_digit()) {
+        if months.contains(&w0_clean) && w1_clean.len() == 4 && w1_clean.chars().all(|c| c.is_ascii_digit()) {
             entities.insert(format!("{} {}", window[0].trim_matches(|c: char| !c.is_alphanumeric()), w1_clean));
         }
         // "Q3 2025"

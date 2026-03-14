@@ -363,7 +363,7 @@ impl LLMProvider for AnthropicProvider {
         let byte_stream = response.bytes_stream();
         use futures_util::StreamExt;
         let reader = tokio_util::io::StreamReader::new(
-            byte_stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+            byte_stream.map(|r| r.map_err(std::io::Error::other)),
         );
         let mut lines = reader.lines();
 
@@ -378,8 +378,8 @@ impl LLMProvider for AnthropicProvider {
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim().to_string();
 
-            if line.starts_with("event: ") {
-                current_event_type = line[7..].to_string();
+            if let Some(event) = line.strip_prefix("event: ") {
+                current_event_type = event.to_string();
                 continue;
             }
 

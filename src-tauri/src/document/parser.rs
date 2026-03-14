@@ -341,10 +341,9 @@ fn split_fused_heading(line: &str) -> Vec<String> {
                 // Keyword at end of line with nothing after — check if fused from left
                 if abs_pos > 0 {
                     let prev_char = line[..abs_pos].chars().last().unwrap_or(' ');
-                    if prev_char != ' ' && prev_char != '\n' {
-                        if best_match.is_none() || abs_pos < best_match.unwrap().0 {
+                    if prev_char != ' ' && prev_char != '\n'
+                        && (best_match.is_none() || abs_pos < best_match.unwrap().0) {
                             best_match = Some((abs_pos, kw.len()));
-                        }
                     }
                 }
                 break;
@@ -358,10 +357,9 @@ fn split_fused_heading(line: &str) -> Vec<String> {
             };
 
             // It's a fused keyword if content runs into it from either side
-            if is_fused_right || is_fused_left {
-                if best_match.is_none() || abs_pos < best_match.unwrap().0 {
+            if (is_fused_right || is_fused_left)
+                && (best_match.is_none() || abs_pos < best_match.unwrap().0) {
                     best_match = Some((abs_pos, kw.len()));
-                }
             }
 
             search_from = abs_pos + 1;
@@ -403,7 +401,7 @@ fn split_leading_keyword(line: &str) -> Vec<String> {
 
     // Sort keywords longest-first to prefer "work experience" over "experience"
     let mut sorted_kws: Vec<&str> = SECTION_KEYWORDS.to_vec();
-    sorted_kws.sort_by(|a, b| b.len().cmp(&a.len()));
+    sorted_kws.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     for kw in &sorted_kws {
         if !lower.starts_with(kw) {
@@ -434,7 +432,7 @@ fn split_leading_keyword(line: &str) -> Vec<String> {
                 && rest
                     .chars()
                     .next()
-                    .map_or(false, |c| c.is_uppercase() || c.is_ascii_digit())
+                    .is_some_and(|c| c.is_uppercase() || c.is_ascii_digit())
             {
                 return vec![line[..kw_end].to_string(), rest.to_string()];
             }

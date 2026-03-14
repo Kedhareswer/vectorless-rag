@@ -218,7 +218,8 @@ impl Database {
             .unwrap_or(0);
 
         // Dispatch table: index 0 = migrate_v0_to_v1, index 1 = migrate_v1_to_v2, etc.
-        let migrations: Vec<fn(&Self) -> Result<(), DbError>> = vec![
+        type MigrationFn = fn(&Database) -> Result<(), DbError>;
+        let migrations: Vec<MigrationFn> = vec![
             Self::migrate_v0_to_v1,
             Self::migrate_v1_to_v2,
             Self::migrate_v2_to_v3,

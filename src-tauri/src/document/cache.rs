@@ -22,6 +22,7 @@ impl TreeCache {
         self.map.get(doc_id)
     }
 
+    #[allow(clippy::map_entry)] // entry() borrows map, preventing eviction loop
     pub fn insert(&mut self, doc_id: String, tree: DocumentTree) {
         if self.map.contains_key(&doc_id) {
             // Update existing entry
@@ -49,6 +50,10 @@ impl TreeCache {
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 

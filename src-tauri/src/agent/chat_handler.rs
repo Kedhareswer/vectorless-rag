@@ -230,6 +230,7 @@ fn should_enrich(processed: &super::query::ProcessedQuery) -> bool {
 ///       → deterministic content fetch → ONE streaming LLM call → answer.
 ///
 /// All events (steps, tokens, response, error) are sent via the Tauri Channel.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_chat(
     channel: &Channel<ChatEvent>,
     db: &Database,

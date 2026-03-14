@@ -22,10 +22,9 @@ pub fn validate_provider(config: &ProviderConfig) -> Result<(), String> {
         }
     }
 
-    if !config.base_url.is_empty() {
-        if !config.base_url.starts_with("http://") && !config.base_url.starts_with("https://") {
+    if !config.base_url.is_empty()
+        && !config.base_url.starts_with("http://") && !config.base_url.starts_with("https://") {
             return Err("Base URL must start with http:// or https://".to_string());
-        }
     }
 
     Ok(())

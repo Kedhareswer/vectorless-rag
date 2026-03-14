@@ -317,12 +317,11 @@ fn read_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
         let marker = data[i + 1];
         // SOF markers: 0xC0..0xC3, 0xC5..0xC7, 0xC9..0xCB, 0xCD..0xCF
-        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
-            if i + 9 < data.len() {
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF)
+            && i + 9 < data.len() {
                 let height = u32::from(data[i + 5]) << 8 | u32::from(data[i + 6]);
                 let width = u32::from(data[i + 7]) << 8 | u32::from(data[i + 8]);
                 return Some((width, height));
-            }
         }
         if i + 3 >= data.len() {
             break;

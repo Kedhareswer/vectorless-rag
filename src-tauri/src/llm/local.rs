@@ -536,10 +536,8 @@ fn extract_from_zip(
     let server_name = "llama-server";
 
     if !dest_dir.join(server_name).exists() {
-        return Err(format!(
-            "llama-server not found in archive. The release format may have changed. \
-             Try downloading manually from https://github.com/ggml-org/llama.cpp/releases"
-        ));
+        return Err("llama-server not found in archive. The release format may have changed. \
+             Try downloading manually from https://github.com/ggml-org/llama.cpp/releases".to_string());
     }
 
     Ok(())
