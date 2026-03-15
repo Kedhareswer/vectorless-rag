@@ -1,10 +1,13 @@
-name: CI
+name: CI & Release
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
+permissions:
+  contents: write
 
 jobs:
   rust:
@@ -55,3 +58,75 @@ jobs:
 
       - name: Build
         run: npx vite build
+
+  release:
+    name: Release
+    needs: [rust, frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: version
+        shell: bash
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          VERSION="${LATEST_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          PATCH=$((PATCH + 1))
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update version in project files
+        shell: bash
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" package.json
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
+          sed -i "0,/^version = \"[^\"]*\"/s//version = \"$VERSION\"/" src-tauri/Cargo.toml
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci --loglevel=warn
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_TERM_QUIET: "true"
+        with:
+          tauriScript: npx tauri
+          tagName: ${{ steps.version.outputs.tag }}
+          releaseName: "TGG ${{ steps.version.outputs.tag }}"
+          releaseBody: |
+            ## TGG ${{ steps.version.outputs.tag }} — Tree-Grounded Generation
+
+            ### What's new
+            See [commit history](https://github.com/${{ github.repository }}/compare/${{ steps.version.outputs.tag }}...HEAD) for details.
+
+            ### Download
+            - **Windows Installer (.exe)** — recommended, includes auto-updater
+            - **Windows MSI (.msi)** — for enterprise / group policy deployment
+
+            ---
+            *No embeddings. No vector database. Just structured exploration.*
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: false
