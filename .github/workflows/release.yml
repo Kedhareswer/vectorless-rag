@@ -68,13 +68,14 @@ jobs:
           workspaces: src-tauri -> target
 
       - name: Install frontend dependencies
-        run: npm install
+        run: npm ci --loglevel=warn
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          tauriScript: npx tauri
           tagName: ${{ steps.version.outputs.tag }}
           releaseName: "TGG ${{ steps.version.outputs.tag }}"
           releaseBody: |
