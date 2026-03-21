@@ -1,6 +1,7 @@
 pub mod provider;
 pub mod retry;
 pub mod local;
+pub mod slm;
 pub mod groq;
 pub mod google;
 pub mod openrouter;

@@ -54,6 +54,15 @@ pub fn run() {
     let db = Database::new(&db_path).expect("Failed to open database");
     db.initialize().expect("Failed to initialize database schema");
 
+    // Try to load the SLM engine at startup if a model is already downloaded.
+    // This runs once, so subsequent ingest/enrichment calls don't need to reload.
+    if let Some(app_data) = app_data_dir() {
+        let status = llm::local::check_local_model(&app_data, &db);
+        if let (Some(model_path), true) = (status.model_path, status.tokenizer_ready) {
+            let _ = llm::local::load_engine(&model_path);
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -92,6 +101,7 @@ pub fn run() {
             commands::get_bookmarks,
             commands::delete_bookmark,
             commands::get_cross_doc_relations,
+            commands::check_liteparse_available,
             commands::get_model_options,
             commands::check_local_model,
             commands::download_local_model,

@@ -3,6 +3,7 @@ pub mod parser;
 pub mod image;
 pub mod cache;
 pub mod metadata;
+pub mod liteparse;
 
 pub use tree::{DocType, DocumentTree, NodeType, TreeNode, TreeNodeSummary, Relation, RelationType};
 pub use parser::{DocumentParser, MarkdownParser, PlainTextParser, ParseError, get_parser_for_file};

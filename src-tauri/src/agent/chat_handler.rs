@@ -16,8 +16,6 @@ use crate::llm::{
 use super::events::ChatEvent;
 use super::deterministic::{fetch_content, format_for_prompt};
 use super::query::{preprocess_query, rewrite_query, generate_hyde, stepback_query, extract_terms_from_text, QueryIntent};
-// tools.rs is scaffolding for a future agentic loop — not used in the active pipeline.
-// use super::tools::{execute_tool, get_provider_tools};
 use crate::llm::local;
 
 /// Rough token estimate: ~4 chars per token plus overhead for role/formatting.
@@ -178,8 +176,8 @@ fn fetch_step_output_summary(
 /// - Very few search terms (<3) — enrichment generates better vocabulary matches.
 /// - Specific/Factual intent with few terms — unclear queries need disambiguation.
 fn should_enrich(processed: &super::query::ProcessedQuery) -> bool {
-    // Hard gate: local sidecar must be running (model + binary downloaded by user)
-    if !local::is_sidecar_running() {
+    // Hard gate: local SLM engine must be loaded (model downloaded by user)
+    if !local::is_engine_loaded() {
         return false;
     }
 
@@ -264,7 +262,7 @@ pub async fn run_agent_chat(
 
     // ── Phase 3: LLM-powered query enrichment ───────────────────────
     // Query Rewrite, HyDE, StepBack — improve retrieval term coverage.
-    // Source priority: local sidecar (free) → cloud provider (counts tokens).
+    // Uses local candle SLM engine (free, in-process) for enrichment calls.
     // Only runs when the query is ambiguous/short/unclear (see should_enrich).
     // All three are non-fatal: errors report as "Skipped" and pipeline continues.
 
@@ -364,6 +362,12 @@ pub async fn run_agent_chat(
         }
     }
 
+    // ── Cancel check: after enrichment, before fetch ────────────────
+    if cancel.load(Ordering::SeqCst) {
+        let _ = channel.send(ChatEvent::Error { error: "Query cancelled.".to_string() });
+        return Ok(());
+    }
+
     // ── Phase 4: Deterministic content fetch (enriched terms) ───────
     let fetched = fetch_content(&processed, &trees);
 
@@ -393,6 +397,12 @@ pub async fn run_agent_chat(
             tokens: 0,
             latency_ms: 0,
         });
+    }
+
+    // ── Cancel check: after fetch, before prompt build ──────────────
+    if cancel.load(Ordering::SeqCst) {
+        let _ = channel.send(ChatEvent::Error { error: "Query cancelled.".to_string() });
+        return Ok(());
     }
 
     // ── Phase 5: Build prompt with fetched content ──────────────────
@@ -458,6 +468,12 @@ Working with: {label}"#,
         relations = relations_context,
         label = doc_label,
     );
+
+    // ── Cancel check: after prompt build, before history load ───────
+    if cancel.load(Ordering::SeqCst) {
+        let _ = channel.send(ChatEvent::Error { error: "Query cancelled.".to_string() });
+        return Ok(());
+    }
 
     // ── Phase 6: Load conversation history ──────────────────────────
     let mut history_messages: Vec<Message> = Vec::new();

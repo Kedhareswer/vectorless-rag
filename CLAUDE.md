@@ -26,6 +26,10 @@ cargo check                # Fast compile check (run after every .rs change)
 cargo test --lib db::      # DB layer tests
 cargo test --lib document::parser   # PDF/MD parser tests
 cargo test --lib agent::query       # Query preprocessing tests
+
+# Frontend tests (Vitest + Testing Library)
+npm test                   # Run all frontend tests once
+npm run test:watch         # Watch mode
 ```
 
 > Tests in `commands.rs` / Tauri-dependent code cannot run via `cargo test` — expected, pre-existing limitation.
@@ -40,27 +44,31 @@ Phase 1  Fast heuristic preprocess (sync, ~0ms)
 
 Phase 2  Cancel check
 
-Phase 3  LLM-powered query enrichment (3 sequential LLM calls)
+Phase 3  LLM-powered query enrichment (3 parallel LLM calls via candle SLM)
          3a. Query Rewrite  — search-optimized reformulation
          3b. HyDE           — hypothetical answer passage, extract terms
          3c. StepBack       — broader question, extract terms
          All new terms merged into ProcessedQuery.search_terms
 
+         Cancel check
+
 Phase 4  Deterministic content fetch (sync, no LLM)
          code decides what to read based on intent + enriched terms
+
+         Cancel check
 
 Phase 5  Cross-doc relation discovery (if >1 doc)
          compare entity/topic metadata across trees → persist to DB
 
 Phase 6  Load conversation history (token-windowed, 8000 token budget)
 
-Phase 7  Cancel check
+         Cancel check
 
-Phase 8  ONE streaming LLM call (no tools)
+Phase 7  ONE streaming LLM call (no tools)
          system prompt = doc content + discovered relations
          streamed tokens forwarded to frontend
 
-Phase 9  Save full trace (preprocessing + fetch + LLM steps)
+Phase 8  Save full trace (preprocessing + fetch + LLM steps)
 ```
 
 **Critical pipeline rules:**
@@ -74,8 +82,9 @@ Phase 9  Save full trace (preprocessing + fetch + LLM steps)
 
 ```
 React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
-                                          ├── Document Engine (parsers, tree builder, cache, metadata)
+                                          ├── Document Engine (parsers, tree builder, cache, metadata, liteparse)
                                           ├── Query Pipeline (query.rs, deterministic.rs, chat_handler.rs)
+                                          ├── SLM Engine (candle GGUF inference, in-process, CPU-only)
                                           ├── LLM Provider Layer (10 providers + retry wrapper)
                                           └── SQLite DB (trees, traces, conversation_documents)
 ```
@@ -86,7 +95,7 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **Backend**: Rust (Tokio async runtime)
 - **Database**: SQLite via `rusqlite` (document trees, traces, settings) — schema at V3
 - **Styling**: CSS custom properties + CSS modules, Inter font, JetBrains Mono for code
-- **State management**: Zustand stores (chat, documents, settings)
+- **State management**: Zustand stores (chat, documents, settings, theme, localModel)
 
 ## LLM Providers (10 total, all real)
 - **Groq** — Llama, Mixtral, Gemma (fast inference)
@@ -110,8 +119,8 @@ Every document is parsed into a uniform tree:
 Node { id, node_type, content, metadata, children, relations }
 ```
 - Type-specific parsers in `document/parser.rs` output into this same schema
-- **PDF parser**: line-by-line with `SECTION_KEYWORDS` (~40 common headings) + heading heuristics (all-caps, numbered, title-case ≤5 words) + two-pass line splitting (`split_fused_heading` → `split_leading_keyword`) to handle pdf_extract library artefacts where heading text merges with body text
-- Images get placeholder nodes (image extraction returns empty Vec — known stub)
+- **PDF parser**: LiteParse (optional, layout-aware) → fallback to pdf-extract. 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
+- **Image extraction**: lopdf extracts embedded JPEG/PNG/raw images; positioned as ImageNode in tree (no visual analysis)
 - Metadata fields: `summary`, `entities`, `topics`, `page_number`, `word_count`
 
 ### Document Scope: Per-Chat, Not Global
@@ -122,13 +131,14 @@ conversation_documents (conv_id TEXT, doc_id TEXT, added_at TEXT)
 - Same document can be in multiple chats (no duplication of file/tree data)
 - IPC commands: `add_doc_to_conversation`, `remove_doc_from_conversation`, `get_conversation_doc_ids`
 - Frontend: `conversationDocIds` in chat store — never use global document selection
-- Sidebar shows docs for the active conversation only
+- DocsPanel (slide-over) shows docs for the active conversation only
 
-### Query Enrichment (all real LLM calls, same provider)
-- **Query Rewrite** — LLM reformulates for better search coverage
-- **HyDE** — LLM writes a hypothetical answer passage; terms extracted match document vocabulary
-- **StepBack** — LLM generates broader question; retrieves background context
+### Query Enrichment (candle SLM, in-process)
+- **Query Rewrite** — SLM reformulates for better search coverage
+- **HyDE** — SLM writes a hypothetical answer passage; terms extracted match document vocabulary
+- **StepBack** — SLM generates broader question; retrieves background context
 - All three in `agent/query.rs`: `rewrite_query()`, `generate_hyde()`, `stepback_query()`
+- Uses `llm/slm.rs` (candle GGUF engine) — no external process, no network
 - Results enrich `ProcessedQuery.search_terms` before deterministic fetch
 
 ### Deterministic Content Fetcher (`agent/deterministic.rs`)
@@ -151,30 +161,33 @@ Intent → fetch strategy:
 - `StepRecord`: one per pipeline step
 - Cost via `estimate_cost(model_id, input_tokens, output_tokens)` in `chat_handler.rs`
 
-## Dead Code (scaffolding for future ReAct agent — not called by any live path)
-Do NOT resurrect without full wiring:
-- `agent/runtime.rs` — `AgentRuntime`, `build_system_prompt()` — never called
-- `agent/context.rs` — `ExplorationContext` — never called
-- `agent/tools.rs` — all tool definitions — never called
-
-## Known Stubs
-- **Local model inference**: `llm/local.rs` — download + progress tracking work; inference fails
-- **PDF image extraction**: `document/image.rs` returns empty `Vec`
-- **Per-request cancel flags**: `AtomicBool` checked before LLM call only, not between preprocessing steps
+## Known Limitations
+- **SLM inference quality**: Qwen2.5 0.5B is tiny — summaries and entity extraction are approximate. Works well for enrichment terms, not for user-facing answers.
+- **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
+- **LiteParse coupling**: LiteParse JSON format may change between versions — parser handles gracefully by falling back to Rust parser.
 
 ## UI Design
 
-### Layout: 3-panel adaptive
+### Layout: TopBar + slide-over panels
 ```
-┌──────────┬─────────────────────┬──────────────────┐
-│ Sidebar  │    Main Chat        │  Preview Panel   │
-│  200px   │    flexible         │   360px          │
-│  Chats   │  + ThinkingBlocks   │  • Doc Tree      │
-│  Docs    │    (steps visible)  │  • Relations     │
-│  Config  │                     │  • Trace/Eval    │
-└──────────┴─────────────────────┴──────────────────┘
+┌─────────────────────────────────────────────────────┐
+│ TopBar: ConversationSwitcher | icon buttons (docs,  │
+│         trace, settings)                            │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│              Main Chat Area                         │
+│           + ThinkingBlocks (steps visible)           │
+│                                                     │
+│   ┌────────────────────┐                            │
+│   │ SlidePanel overlay │  (DocsPanel, TracePanel,   │
+│   │   (from right)     │   SettingsModal)           │
+│   └────────────────────┘                            │
+└─────────────────────────────────────────────────────┘
 ```
-- Sidebar default tab: **Chats**
+- ConversationSwitcher: dropdown in TopBar (replaces sidebar chats tab)
+- DocsPanel: slide-over panel showing per-conversation documents
+- TracePanel: slide-over panel with trace/cost details
+- SettingsModal: provider configuration
 - ThinkingBlock shows each pipeline step with icon, label, output preview, token badge, latency badge
 
 ### ThinkingBlock Step Labels
@@ -214,25 +227,27 @@ src-tauri/src/
   commands.rs               — Tauri IPC handlers (thin delegation only)
 
   document/
-    parser.rs               — PDF, markdown, plaintext, code parsers; SECTION_KEYWORDS
+    parser.rs               — PDF (LiteParse + pdf-extract), markdown, plaintext, code parsers
     tree.rs                 — DocumentTree, TreeNode, NodeType
-    image.rs                — image extraction (stub)
+    image.rs                — PDF/DOCX image extraction (lopdf + zip)
     cache.rs                — LRU tree cache
-    metadata.rs             — heuristic entity/topic extraction, cross-doc relation discovery
+    metadata.rs             — SLM + heuristic entity/topic/summary extraction, cross-doc relations
+    liteparse.rs            — optional LiteParse integration (runtime npx detection)
 
   agent/
     query.rs                — heuristic preprocess + rewrite_query/generate_hyde/stepback_query
     deterministic.rs        — fetch_content() per-intent strategies, FetchedContent
     chat_handler.rs         — run_agent_chat() — THE ONLY ACTIVE PIPELINE FILE
     events.rs               — ChatEvent enum
-    runtime.rs, context.rs, tools.rs  — DEAD CODE (future ReAct scaffold)
 
   llm/
     provider.rs             — LLMProvider trait, Message, LLMResponse, ProviderConfig
     retry.rs                — RetryProvider (exponential backoff)
+    slm.rs                  — candle-based in-process GGUF inference (Qwen2.5)
+    local.rs                — model download/management, delegates inference to slm.rs
     anthropic.rs            — Anthropic (real SSE streaming)
     openai_compat.rs        — OpenAI, DeepSeek, xAI, Qwen, AgentRouter
-    groq.rs, google.rs, openrouter.rs, local.rs
+    groq.rs, google.rs, openrouter.rs
 
   db/
     schema.rs               — SQLite schema V3, migrations, all CRUD queries
@@ -243,13 +258,21 @@ src/
     chat.ts                 — conversations, messages, explorationSteps, conversationDocIds, relationsVersion
     documents.ts            — document library (global), activeDocumentId
     settings.ts             — provider configs, active provider
+    theme.ts                — light/dark theme management
+    localModel.ts           — local model download state
   lib/tauri.ts              — typed invoke wrappers for all Tauri commands
   components/
-    sidebar/Sidebar.tsx     — chats tab (default), docs tab (per-conversation), settings tab
-    chat/ChatPanel.tsx      — message input, handleSend, event handler, ThinkingBlock list
-    chat/ThinkingBlock.tsx  — renders one pipeline step
-    preview/PreviewPanel.tsx, CanvasView.tsx, TraceView.tsx, RelationsView.tsx
+    common/TopBar.tsx         — top navigation bar with ConversationSwitcher + icon buttons
+    common/ConversationSwitcher.tsx — conversation dropdown (replaces sidebar chats tab)
+    common/SlidePanel.tsx     — reusable slide-over panel wrapper
+    common/IconButton.tsx     — shared icon button component
     common/ModelDownloadDialog.tsx
+    chat/ChatPanel.tsx        — message input, handleSend, event handler, ThinkingBlock list
+    chat/ThinkingBlock.tsx    — renders one pipeline step
+    preview/DocsPanel.tsx     — per-conversation document list (slide-over)
+    preview/TracePanel.tsx    — trace/cost panel (slide-over)
+    preview/TreeView.tsx, CanvasView.tsx, TraceView.tsx, RelationsView.tsx
+    settings/SettingsModal.tsx — provider configuration modal
 ```
 
 ## DB Schema (V3 — current)
@@ -274,6 +297,8 @@ providers (id, name, api_key_encrypted, base_url, model, is_active)
 - All Tauri commands return `Result<T, String>` and are async
 - Frontend state in Zustand stores, one store per domain
 - No `#[allow(dead_code)]` on active code — only on scaffolding in runtime.rs/tools.rs/context.rs
+- Git: [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`
+- All Tauri IPC calls go through wrapper functions in `src/lib/tauri.ts` — never call `invoke()` directly from components
 
 ## Development Rules
 
@@ -310,7 +335,7 @@ providers (id, name, api_key_encrypted, base_url, model, is_active)
 ### Security
 - File paths validated before parsing — reject traversal patterns (`validation.rs`)
 - LLM response content treated as untrusted text (no eval, no raw HTML injection)
-- API keys stored in `api_key_encrypted` DB column — column name is aspirational; actual encryption not yet implemented (known gap)
+- API keys stored in OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service) via `keyring` crate. DB stores `__keychain__` placeholder, not the actual secret.
 
 ## Roadmap Status
 
@@ -320,6 +345,13 @@ providers (id, name, api_key_encrypted, base_url, model, is_active)
 | M2 | Reliable Engine | complete |
 | M3 | Quality Content | complete |
 | M4 | Smooth Operation | complete |
-| M5 | Smart Pipeline | **in progress** — deterministic pipeline done; local model inference stub |
+| M5 | Smart Pipeline | **complete** — core pipeline fully working; local model inference is optional enhancement |
 
 Full roadmap: `.planning/roadmap/`
+
+## CI
+
+GitHub Actions (`.github/workflows/ci.yml`) — 3 jobs:
+- **Rust**: clippy + `cargo test --lib`
+- **Frontend**: `tsc --noEmit` + `vitest run` + `vite build`
+- **Release**: Windows MSI/EXE via git tags (auto-versioning)

@@ -69,22 +69,8 @@ pub fn ingest_document(
     let parser = get_parser_for_file(&file_path);
     let mut tree = parser.parse(&file_path).map_err(|e| e.to_string())?;
 
-    // Try to start the llama-server sidecar for LLM-powered enrichment.
-    // Non-fatal: if the sidecar binary isn't present or model isn't downloaded,
-    // enrichment silently falls back to heuristic extraction.
-    if let Ok(app_data) = app.path().app_data_dir() {
-        let status = local::check_local_model(&app_data, &db);
-        if let Some(model_path) = status.model_path {
-            let _ = local::start_sidecar(&app_data, &model_path);
-        }
-    }
-
-    // Enrich nodes with metadata (LLM-generated if model loaded, else heuristic)
-    enrich_tree_metadata(&mut tree);
-
     // Extract embedded images (PDF and DOCX)
     let images = extract_images_from_path(&file_path, &tree.id);
-    // Attach image nodes to the tree root so they appear in the structure
     if !images.is_empty() {
         use crate::document::tree::{NodeType, TreeNode};
         let root_id = tree.root_id.clone();
@@ -104,12 +90,70 @@ pub fn ingest_document(
         }
     }
 
+    // Save the tree immediately (no metadata yet — user sees structure instantly).
     db.save_document(&tree, Some(&file_path))
         .map_err(|e| e.to_string())?;
-    // Populate cache with the enriched tree
     let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
     cache_guard.insert(tree.id.clone(), tree.clone());
+    drop(cache_guard);
+
+    // Spawn background metadata enrichment — user sees tree immediately,
+    // metadata (summaries, entities, topics) populates progressively.
+    let doc_id = tree.id.clone();
+    let db_inner = db.inner().clone();
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        enrich_document_background(&app_handle, &db_inner, &doc_id);
+    });
+
     Ok(tree)
+}
+
+/// Background metadata enrichment: loads tree, enriches nodes one by one,
+/// emits progress events, saves updated tree when done.
+fn enrich_document_background(
+    app: &tauri::AppHandle,
+    db: &Database,
+    doc_id: &str,
+) {
+    use tauri::Emitter;
+
+    // Load the tree from DB
+    let mut tree = match db.get_document(doc_id) {
+        Ok(Some(t)) => t,
+        _ => return,
+    };
+
+    let root_id = tree.root_id.clone();
+    let child_ids: Vec<String> = tree
+        .get_node(&root_id)
+        .map(|r| r.children.clone())
+        .unwrap_or_default();
+    let total = child_ids.len();
+
+    // Emit start event
+    let _ = app.emit("enrichment-progress", serde_json::json!({
+        "docId": doc_id,
+        "status": "started",
+        "total": total,
+        "completed": 0,
+    }));
+
+    // Enrich all nodes (this calls SLM if loaded, else heuristic — both are fine)
+    let enriched = enrich_tree_metadata(&mut tree);
+
+    // Save the enriched tree
+    if let Err(e) = db.save_document(&tree, None) {
+        eprintln!("Failed to save enriched tree: {}", e);
+    }
+
+    // Emit completion event with the updated tree
+    let _ = app.emit("enrichment-progress", serde_json::json!({
+        "docId": doc_id,
+        "status": "completed",
+        "total": total,
+        "completed": enriched,
+    }));
 }
 
 #[tauri::command]
@@ -368,6 +412,13 @@ pub fn get_cross_doc_relations(
     db.get_cross_doc_relations_for_docs(&doc_ids).map_err(|e| e.to_string())
 }
 
+// --- LiteParse status ---
+
+#[tauri::command]
+pub fn check_liteparse_available() -> bool {
+    crate::document::liteparse::is_available()
+}
+
 // --- Local model commands ---
 
 #[tauri::command]
@@ -431,8 +482,9 @@ pub fn delete_local_model(
 // --- Re-enrich command ---
 
 /// Re-run metadata enrichment on an already-ingested document.
-/// Uses the local sidecar model if running, otherwise falls back to heuristic extraction.
+/// Uses the local SLM engine if loaded, otherwise falls back to heuristic extraction.
 /// Clears existing summaries so they are regenerated, then saves the updated tree.
+/// Intentionally loads the SLM here since the user explicitly requested re-enrichment.
 #[tauri::command]
 pub fn reenrich_document(
     app: tauri::AppHandle,
@@ -445,11 +497,11 @@ pub fn reenrich_document(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Document not found: {}", doc_id))?;
 
-    // Try to start the sidecar if a model is available
+    // Try to load the SLM engine if a model is available
     if let Ok(app_data) = app.path().app_data_dir() {
         let status = local::check_local_model(&app_data, &db);
         if let Some(model_path) = status.model_path {
-            let _ = local::start_sidecar(&app_data, &model_path);
+            let _ = local::load_engine(&model_path);
         }
     }
 
@@ -725,8 +777,8 @@ pub fn clear_app_data(
     app: tauri::AppHandle,
     db: State<Database>,
 ) -> Result<(), String> {
-    // Stop sidecar before touching its model file
-    local::stop_sidecar();
+    // Unload SLM engine before touching its model file
+    local::unload_engine();
 
     // Delete the local model file and clear its settings
     if let Ok(app_data) = app.path().app_data_dir() {

@@ -70,7 +70,7 @@ export const useLocalModelStore = create<LocalModelState>((set, get) => ({
           model_id: null,
           model_path: null,
           size_bytes: null,
-          binary_ready: false,
+          tokenizer_ready: false,
         },
         progress: null,
       });

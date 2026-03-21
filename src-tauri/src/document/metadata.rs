@@ -35,15 +35,41 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
             continue;
         }
 
-        // Use LLM-generated summary if a local model is loaded, otherwise
-        // fall back to the extractive heuristic.
-        let summary = if local::is_sidecar_running() {
-            llm_summary(&content).unwrap_or_else(|_| extractive_summary(&content))
+        // Use SLM-generated metadata if a local model is loaded, otherwise
+        // fall back to heuristic extraction.
+        let use_slm = local::is_engine_loaded();
+
+        let summary = if use_slm {
+            slm_summary(&content).unwrap_or_else(|_| extractive_summary(&content))
         } else {
             extractive_summary(&content)
         };
-        let entities = extract_entities(&content);
-        let topics = extract_topics(&content);
+
+        // Hybrid entity extraction: heuristic regex + SLM (union of both)
+        let mut entities = extract_entities(&content);
+        if use_slm {
+            if let Ok(slm_ents) = slm_entities(&content) {
+                for e in slm_ents {
+                    if !entities.contains(&e) {
+                        entities.push(e);
+                    }
+                }
+                entities.truncate(15);
+            }
+        }
+
+        // Hybrid topic extraction: heuristic TF + SLM
+        let mut topics = extract_topics(&content);
+        if use_slm {
+            if let Ok(slm_tops) = slm_topics(&content) {
+                for t in slm_tops {
+                    if !topics.contains(&t) {
+                        topics.push(t);
+                    }
+                }
+                topics.truncate(8);
+            }
+        }
 
         if let Some(node) = tree.nodes.get_mut(child_id) {
             // Only set summary if node doesn't already have one
@@ -94,9 +120,9 @@ fn gather_node_content(tree: &DocumentTree, node_id: &str) -> String {
     parts.join(" ")
 }
 
-/// LLM-generated summary using the loaded local GGUF model.
+/// SLM-generated summary using the loaded local GGUF model.
 /// Returns a 1-2 sentence summary of the provided content.
-fn llm_summary(content: &str) -> Result<String, String> {
+fn slm_summary(content: &str) -> Result<String, String> {
     let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
         &content[..MAX_CONTENT_FOR_SUMMARY]
     } else {
@@ -104,12 +130,47 @@ fn llm_summary(content: &str) -> Result<String, String> {
     };
     let system = "You are a document analysis assistant. Write a concise 1-2 sentence summary of the provided text. Only output the summary, nothing else.";
     let user = format!("Summarize this document section:\n\n{}", truncated);
-    let result = local::chat_inference(system, &user, 120)?;
+    let result = local::chat_inference(system, &user, 80)?;
     if result.is_empty() {
-        Err("Empty LLM output".to_string())
+        Err("Empty SLM output".to_string())
     } else {
         Ok(result)
     }
+}
+
+/// SLM-extracted entities (names, dates, amounts, organizations).
+/// Returns entities the SLM found that heuristic regex might miss.
+fn slm_entities(content: &str) -> Result<Vec<String>, String> {
+    let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
+        &content[..MAX_CONTENT_FOR_SUMMARY]
+    } else {
+        content
+    };
+    let system = "Extract key entities (names, dates, amounts, organizations) from the text. Output ONLY a comma-separated list, nothing else.";
+    let user = truncated.to_string();
+    let result = local::chat_inference(system, &user, 100)?;
+    Ok(parse_csv_list(&result))
+}
+
+/// SLM-generated topic keywords.
+fn slm_topics(content: &str) -> Result<Vec<String>, String> {
+    let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
+        &content[..MAX_CONTENT_FOR_SUMMARY]
+    } else {
+        content
+    };
+    let system = "List 3-5 topic keywords for this text. Output ONLY a comma-separated list, nothing else.";
+    let user = truncated.to_string();
+    let result = local::chat_inference(system, &user, 40)?;
+    Ok(parse_csv_list(&result))
+}
+
+/// Parse a comma-separated SLM response into clean trimmed strings.
+fn parse_csv_list(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(|s| s.trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '.').to_string())
+        .filter(|s| !s.is_empty() && s.len() > 1)
+        .collect()
 }
 
 /// Extractive summary: pick the first 1-2 meaningful sentences.

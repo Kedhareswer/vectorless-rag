@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { listen } from '@tauri-apps/api/event';
 import {
   listDocuments,
   getDocument,
@@ -24,6 +25,13 @@ function fromTauriSummary(d: TauriDocumentSummary): DocumentSummary {
   };
 }
 
+interface EnrichmentProgress {
+  docId: string;
+  status: 'started' | 'completed';
+  total: number;
+  completed: number;
+}
+
 interface DocumentsState {
   /** All documents in the system (global library) */
   documents: DocumentSummary[];
@@ -33,6 +41,8 @@ interface DocumentsState {
   isIngesting: boolean;
   isLoadingTree: boolean;
   error: string | null;
+  /** Background enrichment status per document */
+  enrichmentStatus: Record<string, EnrichmentProgress>;
 
   setDocuments: (documents: DocumentSummary[]) => void;
   addDocument: (document: DocumentSummary) => void;
@@ -53,6 +63,7 @@ export const useDocumentsStore = create<DocumentsState>((set) => ({
   isIngesting: false,
   isLoadingTree: false,
   error: null,
+  enrichmentStatus: {},
 
   setDocuments: (documents: DocumentSummary[]) => {
     set({ documents });
@@ -148,3 +159,24 @@ export const useDocumentsStore = create<DocumentsState>((set) => ({
     set({ error: null });
   },
 }));
+
+// Listen for background enrichment progress events from the Rust backend.
+// When enrichment completes for the active document, reload its tree to
+// pick up the new metadata (summaries, entities, topics).
+listen<EnrichmentProgress>('enrichment-progress', (event) => {
+  const progress = event.payload;
+  const store = useDocumentsStore.getState();
+
+  useDocumentsStore.setState((state) => ({
+    enrichmentStatus: {
+      ...state.enrichmentStatus,
+      [progress.docId]: progress,
+    },
+  }));
+
+  if (progress.status === 'completed' && store.activeDocumentId === progress.docId) {
+    store.loadActiveTree(progress.docId);
+  }
+}).catch(() => {
+  // Silently ignore if not in Tauri context (e.g., Vite-only dev mode)
+});

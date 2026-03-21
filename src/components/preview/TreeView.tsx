@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Search,
   ChevronRight,
+  ChevronsUpDown,
   FileText,
   AlignLeft,
   Hash,
@@ -13,6 +14,7 @@ import {
   FolderOpen,
   GitBranch,
   File,
+  X,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useDocumentsStore } from '../../stores/documents';
@@ -68,6 +70,10 @@ interface TreeNodeItemProps {
   activeNodeId: string | null;
   filterText: string;
   visibleIds: Set<string> | null;
+  selectedNodeId: string | null;
+  onSelectNode: (id: string) => void;
+  expandedIds: Set<string>;
+  onToggleExpand: (id: string) => void;
 }
 
 function TreeNodeItem({
@@ -79,8 +85,12 @@ function TreeNodeItem({
   activeNodeId,
   filterText,
   visibleIds,
+  selectedNodeId,
+  onSelectNode,
+  expandedIds,
+  onToggleExpand,
 }: TreeNodeItemProps) {
-  const [expanded, setExpanded] = useState(depth === 0);
+  const expanded = expandedIds.has(nodeId);
   const node = nodes[nodeId];
 
   if (!node) return null;
@@ -101,21 +111,24 @@ function TreeNodeItem({
 
   // Auto-expand if a descendant is the active node
   useEffect(() => {
-    if (activeNodeId && hasChildren) {
+    if (activeNodeId && hasChildren && !expanded) {
       const hasActiveDescendant = (nId: string): boolean => {
         const n = nodes[nId];
         if (!n) return false;
         return n.children.some((cId) => cId === activeNodeId || hasActiveDescendant(cId));
       };
       if (hasActiveDescendant(nodeId)) {
-        setExpanded(true);
+        onToggleExpand(nodeId);
       }
     }
-  }, [activeNodeId, nodeId, nodes, hasChildren]);
+  }, [activeNodeId, nodeId, nodes, hasChildren, expanded, onToggleExpand]);
+
+  const isSelected = selectedNodeId === nodeId;
 
   const handleClick = () => {
+    onSelectNode(nodeId);
     if (hasChildren) {
-      setExpanded((prev) => !prev);
+      onToggleExpand(nodeId);
     }
   };
 
@@ -131,6 +144,7 @@ function TreeNodeItem({
           isExplored && styles.treeItemExplored,
           isVisited && styles.treeItemVisited,
           isActive && styles.treeItemActive,
+          isSelected && styles.treeItemSelected,
         )}
         style={{ paddingLeft: `${8 + depth * 20}px` }}
         onClick={handleClick}
@@ -166,6 +180,10 @@ function TreeNodeItem({
               activeNodeId={activeNodeId}
               filterText={filterText}
               visibleIds={visibleIds}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={onSelectNode}
+              expandedIds={expandedIds}
+              onToggleExpand={onToggleExpand}
             />
           ))}
         </ul>
@@ -174,11 +192,88 @@ function TreeNodeItem({
   );
 }
 
+/** Metadata detail card for a selected node. */
+function NodeMetadataCard({ node }: { node: TreeNode }) {
+  const metadata = node.metadata || {};
+  const summary = node.summary || null;
+  const entities: string[] = metadata.entities
+    ? (Array.isArray(metadata.entities) ? metadata.entities : [])
+    : [];
+  const topics: string[] = metadata.topics
+    ? (Array.isArray(metadata.topics) ? metadata.topics : [])
+    : [];
+  const headingSource = metadata.heading_source as string | undefined;
+  const pageNumber = metadata.page_number as number | undefined;
+  const wordCount = metadata.word_count as number | undefined;
+
+  // Determine enrichment source
+  const hasSummary = !!summary;
+  const hasEntities = entities.length > 0;
+  const hasTopics = topics.length > 0;
+  const hasAnyMetadata = hasSummary || hasEntities || hasTopics;
+
+  return (
+    <div className={styles.metadataCard}>
+      <div className={styles.metadataHeader}>
+        <span className={styles.metadataTitle}>
+          {truncate(node.content || node.node_type, 50)}
+        </span>
+        {headingSource && (
+          <span className={clsx(styles.sourceBadge, headingSource === 'slm' ? styles.sourceBadgeSlm : styles.sourceBadgeHeuristic)}>
+            {headingSource === 'slm' ? 'SLM' : 'Heuristic'}
+          </span>
+        )}
+      </div>
+
+      {hasSummary && (
+        <div className={styles.metadataRow}>
+          <span className={styles.metadataLabel}>Summary</span>
+          <span className={styles.metadataValue}>{summary}</span>
+        </div>
+      )}
+
+      {hasEntities && (
+        <div className={styles.metadataRow}>
+          <span className={styles.metadataLabel}>Entities</span>
+          <div className={styles.tagList}>
+            {entities.map((e, i) => (
+              <span key={i} className={styles.tag}>{e}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hasTopics && (
+        <div className={styles.metadataRow}>
+          <span className={styles.metadataLabel}>Topics</span>
+          <div className={styles.tagList}>
+            {topics.map((t, i) => (
+              <span key={i} className={clsx(styles.tag, styles.tagTopic)}>{t}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className={styles.metadataMeta}>
+        {pageNumber && <span>Page {pageNumber}</span>}
+        {wordCount && <span>{wordCount} words</span>}
+        {!hasAnyMetadata && <span className={styles.metadataEmpty}>No metadata available</span>}
+      </div>
+    </div>
+  );
+}
+
 export function TreeView() {
   const activeDocumentId = useDocumentsStore((s) => s.activeDocumentId);
+  const enrichmentStatus = useDocumentsStore((s) => s.enrichmentStatus);
   const explorationSteps = useChatStore((s) => s.explorationSteps);
   const visitedNodeIdsArr = useChatStore((s) => s.visitedNodeIds);
   const activeNodeId = useChatStore((s) => s.activeNodeId);
+
+  const enriching = activeDocumentId
+    ? enrichmentStatus[activeDocumentId]
+    : undefined;
+  const isEnriching = enriching?.status === 'started';
 
   const visitedNodeIdsSet = useMemo(() => new Set(visitedNodeIdsArr), [visitedNodeIdsArr]);
 
@@ -186,6 +281,40 @@ export function TreeView() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+
+  const toggleExpand = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  // Collect all node IDs that have children (for expand/collapse all)
+  const allExpandableIds = useMemo(() => {
+    if (!tree) return new Set<string>();
+    const ids = new Set<string>();
+    for (const [id, node] of Object.entries(tree.nodes)) {
+      if (node.children.length > 0) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }, [tree]);
+
+  const expandAll = useCallback(() => {
+    setExpandedIds(new Set(allExpandableIds));
+  }, [allExpandableIds]);
+
+  const collapseAll = useCallback(() => {
+    setExpandedIds(new Set());
+  }, []);
 
   // Load tree when active document changes
   useEffect(() => {
@@ -204,6 +333,11 @@ export function TreeView() {
         if (!cancelled) {
           setTree(doc);
           setLoading(false);
+          // Auto-expand root's direct children
+          const root = doc.nodes[doc.root_id];
+          if (root) {
+            setExpandedIds(new Set(root.children.filter((id) => doc.nodes[id]?.children.length > 0)));
+          }
         }
       })
       .catch((err: unknown) => {
@@ -331,6 +465,8 @@ export function TreeView() {
     );
   }
 
+  const nodeCount = Object.keys(tree.nodes).length - 1; // exclude root
+
   return (
     <div className={styles.container}>
       <div className={styles.searchWrapper}>
@@ -342,6 +478,19 @@ export function TreeView() {
           value={filterText}
           onChange={handleFilterChange}
         />
+      </div>
+
+      <div className={styles.toolbar}>
+        <span className={styles.toolbarLabel}>
+          {nodeCount} nodes
+          {isEnriching && <span className={styles.enrichingLabel}> · Enriching metadata...</span>}
+        </span>
+        <button className={styles.toolbarBtn} onClick={expandAll} title="Expand all">
+          <ChevronsUpDown size={13} />
+        </button>
+        <button className={styles.toolbarBtn} onClick={collapseAll} title="Collapse all">
+          <ChevronRight size={13} />
+        </button>
       </div>
 
       <ul className={styles.treeList} role="tree">
@@ -356,9 +505,26 @@ export function TreeView() {
             activeNodeId={activeNodeId}
             filterText={filterText}
             visibleIds={visibleIds}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            expandedIds={expandedIds}
+            onToggleExpand={toggleExpand}
           />
         ))}
       </ul>
+
+      {selectedNodeId && tree.nodes[selectedNodeId] && (
+        <div className={styles.metadataCardWrapper}>
+          <button
+            className={styles.metadataClose}
+            onClick={() => setSelectedNodeId(null)}
+            title="Close metadata"
+          >
+            <X size={12} />
+          </button>
+          <NodeMetadataCard node={tree.nodes[selectedNodeId]} />
+        </div>
+      )}
     </div>
   );
 }

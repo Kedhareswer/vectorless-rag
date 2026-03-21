@@ -76,6 +76,7 @@ pub struct CrossDocRelation {
     pub created_at: String,
 }
 
+#[derive(Clone)]
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
 }

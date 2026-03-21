@@ -179,6 +179,9 @@ export const removeDocFromConversation = (convId: string, docId: string) =>
 export const getConversationDocIds = (convId: string) =>
   invoke<string[]>('get_conversation_doc_ids', { convId });
 
+// LiteParse status
+export const checkLiteparseAvailable = () => invoke<boolean>('check_liteparse_available');
+
 // Local model management
 export interface ModelOption {
   id: string;
@@ -189,6 +192,7 @@ export interface ModelOption {
   url: string;
   filename: string;
   sha256: string | null;
+  tokenizer_url: string;
 }
 
 export interface LocalModelStatus {
@@ -196,8 +200,8 @@ export interface LocalModelStatus {
   model_id: string | null;
   model_path: string | null;
   size_bytes: number | null;
-  /** Whether the llama-server binary is also available and ready to run. */
-  binary_ready: boolean;
+  /** Whether the tokenizer.json is also present alongside the model. */
+  tokenizer_ready: boolean;
 }
 
 export interface DownloadProgress {
@@ -206,7 +210,7 @@ export interface DownloadProgress {
   percent: number;
   done: boolean;
   error: string | null;
-  /** Human-readable label for the current download phase (e.g. "Downloading llama-server binary...") */
+  /** Human-readable label for the current download phase (e.g. "Downloading Qwen2.5 0.5B (Q4)...") */
   phase: string;
 }
 

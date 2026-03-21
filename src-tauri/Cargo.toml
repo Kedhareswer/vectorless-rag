@@ -40,6 +40,9 @@ futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 lopdf = "0.39"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+candle-core = "0.9"
+candle-transformers = "0.9"
+tokenizers = "0.21"
 
 [dev-dependencies]
 tempfile = "3"
