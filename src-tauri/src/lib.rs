@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use db::Database;
 use commands::CancelFlags;
 use document::cache::TreeCache;
+use tauri::Manager;
 
 /// Resolve the database path inside the platform app data directory.
 /// Falls back to current directory if unavailable.
@@ -114,6 +115,13 @@ pub fn run() {
             commands::reenrich_document,
             commands::clear_app_data,
         ])
+        .setup(|app| {
+            // Load the bundled PDFium library used by LiteParse.
+            if let Ok(dir) = app.path().resource_dir() {
+                document::liteparse::configure_library_dir(&dir.join("resources"));
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

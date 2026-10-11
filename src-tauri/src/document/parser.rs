@@ -510,104 +510,19 @@ fn flush_paragraph(
 
 impl DocumentParser for PdfParser {
     fn parse(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
-        // Try LiteParse first if available — better layout-aware extraction.
-        // This is safe to call during ingest because metadata enrichment (the
-        // slow part) now runs in the background, not here.
-        if super::liteparse::is_available()
-            && let Ok(tree) = self.parse_with_liteparse(file_path) {
-                return Ok(tree);
-            }
+        // LiteParse first: layout-aware headings, tables and lists. Falls back to
+        // pdf-extract when PDFium is unavailable or the PDF yields no text
+        // (e.g. scanned pages — OCR is not compiled in).
+        match super::liteparse::parse_pdf(file_path, file_name_of(file_path)) {
+            Ok(tree) => return Ok(tree),
+            Err(e) => eprintln!("LiteParse failed for {}, using pdf-extract: {}", file_path, e),
+        }
 
         self.parse_with_pdf_extract(file_path)
     }
 }
 
 impl PdfParser {
-    /// Parse using LiteParse (external npx tool) for better layout-aware extraction.
-    /// Not called automatically — available via explicit "Re-parse with LiteParse" action.
-    pub fn parse_with_liteparse(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
-        let json = super::liteparse::parse_pdf(file_path)
-            .map_err(ParseError::Other)?;
-        let blocks = super::liteparse::extract_text_blocks(&json);
-        if blocks.is_empty() {
-            return Err(ParseError::Other("LiteParse returned no content".to_string()));
-        }
-
-        let file_name = file_name_of(file_path);
-        let mut tree = DocumentTree::new(file_name, DocType::Pdf);
-        let root_id = tree.root_id.clone();
-
-        if let Some(root) = tree.nodes.get_mut(&root_id) {
-            root.metadata.insert("page_count".to_string(), serde_json::json!(blocks.len()));
-            root.metadata.insert("parse_source".to_string(), serde_json::json!("liteparse"));
-        }
-
-        // Process each page's text through the same heading detection pipeline.
-        let mut section_stack: Vec<(u32, String)> = Vec::new();
-        let mut current_parent = root_id.clone();
-        let mut para_buffer = String::new();
-
-        for (text, page_num) in &blocks {
-            let lines: Vec<&str> = text.lines().collect();
-            for raw_line in lines {
-                let trimmed = raw_line.trim();
-                if trimmed.is_empty() {
-                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    continue;
-                }
-
-                if let Some(level) = detect_heading(trimmed) {
-                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    let title = crate::util::safe_truncate(trimmed, 80).to_string();
-
-                    while section_stack.last().is_some_and(|(l, _)| *l >= level) {
-                        section_stack.pop();
-                    }
-                    let parent = section_stack
-                        .last()
-                        .map(|(_, id)| id.clone())
-                        .unwrap_or_else(|| root_id.clone());
-
-                    let mut section = TreeNode::new(NodeType::Section, title);
-                    section.metadata.insert("heading_level".to_string(), serde_json::json!(level));
-                    section.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
-                    let section_id = section.id.clone();
-                    let _ = tree.add_node(&parent, section);
-                    section_stack.push((level, section_id.clone()));
-                    current_parent = section_id;
-                } else if let Some(level) = slm_classify_heading(trimmed, &para_buffer) {
-                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    let title = crate::util::safe_truncate(trimmed, 80).to_string();
-
-                    while section_stack.last().is_some_and(|(l, _)| *l >= level) {
-                        section_stack.pop();
-                    }
-                    let parent = section_stack
-                        .last()
-                        .map(|(_, id)| id.clone())
-                        .unwrap_or_else(|| root_id.clone());
-
-                    let mut section = TreeNode::new(NodeType::Section, title);
-                    section.metadata.insert("heading_level".to_string(), serde_json::json!(level));
-                    section.metadata.insert("heading_source".to_string(), serde_json::json!("slm"));
-                    section.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
-                    let section_id = section.id.clone();
-                    let _ = tree.add_node(&parent, section);
-                    section_stack.push((level, section_id.clone()));
-                    current_parent = section_id;
-                } else {
-                    if !para_buffer.is_empty() {
-                        para_buffer.push('\n');
-                    }
-                    para_buffer.push_str(trimmed);
-                }
-            }
-        }
-
-        flush_paragraph(&mut tree, &current_parent, &mut para_buffer, blocks.len());
-        Ok(tree)
-    }
-
     /// Parse using the built-in pdf-extract crate (default/fallback).
     fn parse_with_pdf_extract(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
         let file_name = file_name_of(file_path);

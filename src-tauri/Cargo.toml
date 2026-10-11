@@ -44,6 +44,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 candle-core = "0.11"
 candle-transformers = "0.11"
 tokenizers = "0.23"
+# Layout-aware PDF parsing. OCR backends (tesseract / oar-ocr) are off: both pull
+# large native toolchains; scanned PDFs fall back to the pdf-extract parser.
+liteparse = { version = "2.15", default-features = false }
+# PDFium loader used by liteparse. Depended on directly so build.rs receives
+# DEP_PDFIUM_LIB_PATH and can bundle the shared library with the app.
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.11" }
 
 [dev-dependencies]
 tempfile = "3"

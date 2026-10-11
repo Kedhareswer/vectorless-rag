@@ -120,7 +120,7 @@ Every document is parsed into a uniform tree:
 Node { id, node_type, content, metadata, children, relations }
 ```
 - Type-specific parsers in `document/parser.rs` output into this same schema
-- **PDF parser**: LiteParse (optional, layout-aware) → fallback to pdf-extract. 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
+- **PDF parser**: native LiteParse crate (PDFium; layout blocks → Section/Paragraph/ListItem/Table/CodeBlock with page numbers) → fallback to pdf-extract when PDFium is missing or a page has no text (no OCR compiled in). The pdf-extract fallback uses 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
 - **Image extraction**: lopdf extracts embedded JPEG/PNG/raw images; positioned as ImageNode in tree (no visual analysis)
 - Metadata fields: `summary`, `entities`, `topics`, `page_number`, `word_count`
 
@@ -165,7 +165,7 @@ Intent → fetch strategy:
 ## Known Limitations
 - **SLM inference quality**: Qwen2.5 0.5B is tiny — summaries and entity extraction are approximate. Works well for enrichment terms, not for user-facing answers.
 - **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
-- **LiteParse coupling**: LiteParse JSON format may change between versions — parser handles gracefully by falling back to Rust parser.
+- **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. Scanned PDFs need OCR, which is not compiled in (tesseract / oar-ocr features are heavy).
 
 ## UI Design
 
@@ -233,7 +233,7 @@ src-tauri/src/
     image.rs                — PDF/DOCX image extraction (lopdf + zip)
     cache.rs                — LRU tree cache
     metadata.rs             — SLM + heuristic entity/topic/summary extraction, cross-doc relations
-    liteparse.rs            — optional LiteParse integration (runtime npx detection)
+    liteparse.rs            — native LiteParse (PDFium) parsing → document tree
 
   agent/
     query.rs                — heuristic preprocess + rewrite_query/generate_hyde/stepback_query
