@@ -466,6 +466,12 @@ pub async fn download_local_model(
     db.set_setting("local_model_path", &dest.to_string_lossy())
         .map_err(|e| e.to_string())?;
 
+    // Start using the new model now rather than after a restart.
+    let model_path = dest.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || local::switch_engine(&model_path))
+        .await
+        .map_err(|e| format!("Model load task failed: {}", e))??;
+
     Ok(())
 }
 

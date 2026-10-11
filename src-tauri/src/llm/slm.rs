@@ -14,8 +14,11 @@
 //!
 //! ## Supported architectures
 //! Dispatches on GGUF `general.architecture`:
+//!   - `lfm2`  → `quantized_lfm2` (Liquid LFM2 / LFM2.5 — the default models)
 //!   - `qwen2` → `quantized_qwen2` (includes the Q/K/V attention biases Qwen needs)
 //!   - `llama` → `quantized_llama`
+//!
+//! All use the ChatML prompt format (`<|im_start|>` / `<|im_end|>`).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +28,7 @@ use std::time::{Duration, Instant};
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
+use candle_transformers::models::quantized_lfm2 as qlfm2;
 use candle_transformers::models::quantized_llama as qllama;
 use candle_transformers::models::quantized_qwen2 as qqwen2;
 use candle_transformers::utils::apply_repeat_penalty;
@@ -41,6 +45,7 @@ const REPEAT_LAST_N: usize = 64;
 // ── Model weights per architecture ────────────────────────────────────
 
 enum ModelWeights {
+    Lfm2(qlfm2::ModelWeights),
     Llama(qllama::ModelWeights),
     Qwen2(qqwen2::ModelWeights),
 }
@@ -54,6 +59,9 @@ impl ModelWeights {
         let arch = gguf_architecture(&content);
 
         match arch.as_str() {
+            "lfm2" => qlfm2::ModelWeights::from_gguf(content, &mut file, device)
+                .map(Self::Lfm2)
+                .map_err(|e| format!("Failed to load lfm2 weights: {}", e)),
             "qwen2" => qqwen2::ModelWeights::from_gguf(content, &mut file, device)
                 .map(Self::Qwen2)
                 .map_err(|e| format!("Failed to load qwen2 weights: {}", e)),
@@ -65,8 +73,13 @@ impl ModelWeights {
     }
 
     /// Run the model; returns logits for the last input position.
+    ///
+    /// State resets when `index_pos == 0`: attention KV caches restart, and
+    /// LFM2's short-convolution caches are rebuilt from any multi-token input
+    /// (every ChatML prompt is many tokens).
     fn forward(&mut self, input: &Tensor, index_pos: usize) -> candle_core::Result<Tensor> {
         match self {
+            Self::Lfm2(m) => m.forward(input, index_pos),
             Self::Llama(m) => m.forward(input, index_pos),
             Self::Qwen2(m) => m.forward(input, index_pos),
         }
@@ -113,6 +126,8 @@ struct SlmEngine {
     tokenizer: Tokenizer,
     device: Device,
     eos_ids: Vec<u32>,
+    /// Begin-of-text token the model expects first (LFM2: `<|startoftext|>`).
+    bos_id: Option<u32>,
 }
 
 /// Output of one generation call.
@@ -144,11 +159,14 @@ impl SlmEngine {
             .filter_map(|s| tokenizer.token_to_id(s))
             .collect();
 
+        let bos_id = tokenizer.token_to_id("<|startoftext|>");
+
         Ok(Self {
             model,
             tokenizer,
             device,
             eos_ids,
+            bos_id,
         })
     }
 
@@ -169,7 +187,12 @@ impl SlmEngine {
             .tokenizer
             .encode(prompt, true)
             .map_err(|e| format!("Tokenization error: {}", e))?;
-        let prompt_tokens = encoded.get_ids().to_vec();
+        let mut prompt_tokens = encoded.get_ids().to_vec();
+        if let Some(bos) = self.bos_id
+            && prompt_tokens.first() != Some(&bos)
+        {
+            prompt_tokens.insert(0, bos);
+        }
         if prompt_tokens.is_empty() || max_tokens == 0 {
             return Ok(Generation {
                 text: String::new(),
@@ -271,7 +294,7 @@ pub fn is_engine_loaded() -> bool {
         .unwrap_or(false)
 }
 
-/// Format a ChatML prompt (Qwen2.5 Instruct template).
+/// Format a ChatML prompt (LFM2 / Qwen2.5 Instruct template).
 fn chatml_prompt(system: &str, user: &str) -> String {
     format!(
         "<|im_start|>system\n{system}<|im_end|>\n\
@@ -372,39 +395,73 @@ mod tests {
         assert!(lp.sample(&scalar).is_err());
     }
 
-    /// Write a tiny random-weight Qwen2 GGUF plus a word-level tokenizer.
-    fn write_tiny_qwen2(dir: &Path) -> (String, String) {
+    const VOCAB: usize = 32;
+    const EMBD: usize = 8;
+    const KV: usize = 4; // 1 kv head × head_dim 4
+    const FFN: usize = 16;
+
+    fn rand_q(shape: &[usize]) -> candle_core::quantized::QTensor {
         use candle_core::quantized::{GgmlDType, QTensor};
+        let t = Tensor::randn(0f32, 0.5, shape, &Device::Cpu).unwrap();
+        QTensor::quantize(&t, GgmlDType::F32).unwrap()
+    }
+
+    fn write_gguf(
+        path: &Path,
+        metadata: &[(&str, gguf_file::Value)],
+        tensors: &[(String, candle_core::quantized::QTensor)],
+    ) {
+        let mut file = std::fs::File::create(path).unwrap();
+        let md: Vec<(&str, &gguf_file::Value)> = metadata.iter().map(|(k, v)| (*k, v)).collect();
+        let ts: Vec<(&str, &candle_core::quantized::QTensor)> =
+            tensors.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        gguf_file::write(&mut file, &md, &ts).unwrap();
+    }
+
+    /// Word-level tokenizer over `w2..w31`, with `<|im_end|>` (EOS) and
+    /// optionally `<|startoftext|>` (BOS) as special tokens.
+    fn write_tokenizer(path: &Path, with_bos: bool) {
         use std::collections::HashMap;
         use tokenizers::models::wordlevel::WordLevel;
         use tokenizers::pre_tokenizers::whitespace::Whitespace;
 
-        const VOCAB: usize = 32;
-        const EMBD: usize = 8;
-        const KV: usize = 4; // 1 kv head × head_dim 4
-        const FFN: usize = 16;
+        let first = if with_bos { "<|startoftext|>" } else { "[UNK]" };
+        let mut words: Vec<String> = vec![first.to_string(), "<|im_end|>".to_string()];
+        words.extend((words.len()..VOCAB).map(|i| format!("w{i}")));
+        let vocab: HashMap<String, u32> =
+            words.into_iter().enumerate().map(|(i, w)| (w, i as u32)).collect();
+        let wordlevel = WordLevel::builder()
+            .vocab(vocab.into_iter().collect())
+            .unk_token("w2".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(wordlevel);
+        tokenizer.with_pre_tokenizer(Some(Whitespace {}));
+        tokenizer.save(path, false).unwrap();
+    }
 
-        let q = |shape: &[usize]| {
-            let t = Tensor::randn(0f32, 0.5, shape, &Device::Cpu).unwrap();
-            QTensor::quantize(&t, GgmlDType::F32).unwrap()
-        };
-        let tensors = [
-            ("token_embd.weight", q(&[VOCAB, EMBD])),
-            ("output_norm.weight", q(&[EMBD])),
-            ("output.weight", q(&[VOCAB, EMBD])),
-            ("blk.0.attn_q.weight", q(&[EMBD, EMBD])),
-            ("blk.0.attn_k.weight", q(&[KV, EMBD])),
-            ("blk.0.attn_v.weight", q(&[KV, EMBD])),
-            ("blk.0.attn_q.bias", q(&[EMBD])),
-            ("blk.0.attn_k.bias", q(&[KV])),
-            ("blk.0.attn_v.bias", q(&[KV])),
-            ("blk.0.attn_output.weight", q(&[EMBD, EMBD])),
-            ("blk.0.ffn_gate.weight", q(&[FFN, EMBD])),
-            ("blk.0.ffn_up.weight", q(&[FFN, EMBD])),
-            ("blk.0.ffn_down.weight", q(&[EMBD, FFN])),
-            ("blk.0.attn_norm.weight", q(&[EMBD])),
-            ("blk.0.ffn_norm.weight", q(&[EMBD])),
-        ];
+    /// Write a tiny random-weight Qwen2 GGUF plus a word-level tokenizer.
+    fn write_tiny_qwen2(dir: &Path) -> (String, String) {
+        let tensors: Vec<(String, _)> = [
+            ("token_embd.weight", vec![VOCAB, EMBD]),
+            ("output_norm.weight", vec![EMBD]),
+            ("output.weight", vec![VOCAB, EMBD]),
+            ("blk.0.attn_q.weight", vec![EMBD, EMBD]),
+            ("blk.0.attn_k.weight", vec![KV, EMBD]),
+            ("blk.0.attn_v.weight", vec![KV, EMBD]),
+            ("blk.0.attn_q.bias", vec![EMBD]),
+            ("blk.0.attn_k.bias", vec![KV]),
+            ("blk.0.attn_v.bias", vec![KV]),
+            ("blk.0.attn_output.weight", vec![EMBD, EMBD]),
+            ("blk.0.ffn_gate.weight", vec![FFN, EMBD]),
+            ("blk.0.ffn_up.weight", vec![FFN, EMBD]),
+            ("blk.0.ffn_down.weight", vec![EMBD, FFN]),
+            ("blk.0.attn_norm.weight", vec![EMBD]),
+            ("blk.0.ffn_norm.weight", vec![EMBD]),
+        ]
+        .into_iter()
+        .map(|(name, shape)| (name.to_string(), rand_q(&shape)))
+        .collect();
         let metadata = [
             ("general.architecture", gguf_file::Value::String("qwen2".to_string())),
             ("qwen2.attention.head_count", gguf_file::Value::U32(2)),
@@ -416,29 +473,83 @@ mod tests {
         ];
 
         let model_path = dir.join("tiny.gguf");
-        let mut file = std::fs::File::create(&model_path).unwrap();
-        let md: Vec<(&str, &gguf_file::Value)> = metadata.iter().map(|(k, v)| (*k, v)).collect();
-        let ts: Vec<(&str, &QTensor)> = tensors.iter().map(|(k, v)| (*k, v)).collect();
-        gguf_file::write(&mut file, &md, &ts).unwrap();
-
-        let mut words: Vec<String> = vec!["[UNK]".to_string(), "<|im_end|>".to_string()];
-        words.extend((words.len()..VOCAB).map(|i| format!("w{i}")));
-        let vocab: HashMap<String, u32> =
-            words.into_iter().enumerate().map(|(i, w)| (w, i as u32)).collect();
-        let wordlevel = WordLevel::builder()
-            .vocab(vocab.into_iter().collect())
-            .unk_token("[UNK]".to_string())
-            .build()
-            .unwrap();
-        let mut tokenizer = Tokenizer::new(wordlevel);
-        tokenizer.with_pre_tokenizer(Some(Whitespace {}));
         let tokenizer_path = dir.join("tokenizer.json");
-        tokenizer.save(&tokenizer_path, false).unwrap();
-
+        write_gguf(&model_path, &metadata, &tensors);
+        write_tokenizer(&tokenizer_path, false);
         (
             model_path.to_string_lossy().into_owned(),
             tokenizer_path.to_string_lossy().into_owned(),
         )
+    }
+
+    /// Write a tiny LFM2 GGUF: block 0 is a short-convolution block, block 1
+    /// is attention (selected by a per-layer `head_count_kv` of 0 / 1).
+    fn write_tiny_lfm2(dir: &Path) -> (String, String) {
+        const L_CACHE: usize = 3;
+        let mut shapes: Vec<(String, Vec<usize>)> = vec![
+            ("token_embd.weight".into(), vec![VOCAB, EMBD]),
+            ("output_norm.weight".into(), vec![EMBD]),
+            ("blk.0.shortconv.in_proj.weight".into(), vec![3 * EMBD, EMBD]),
+            ("blk.0.shortconv.out_proj.weight".into(), vec![EMBD, EMBD]),
+            ("blk.0.shortconv.conv.weight".into(), vec![EMBD, L_CACHE]),
+            ("blk.1.attn_q.weight".into(), vec![EMBD, EMBD]),
+            ("blk.1.attn_k.weight".into(), vec![KV, EMBD]),
+            ("blk.1.attn_v.weight".into(), vec![KV, EMBD]),
+            ("blk.1.attn_output.weight".into(), vec![EMBD, EMBD]),
+            ("blk.1.attn_q_norm.weight".into(), vec![KV]),
+            ("blk.1.attn_k_norm.weight".into(), vec![KV]),
+        ];
+        for b in 0..2 {
+            shapes.push((format!("blk.{b}.attn_norm.weight"), vec![EMBD]));
+            shapes.push((format!("blk.{b}.ffn_norm.weight"), vec![EMBD]));
+            shapes.push((format!("blk.{b}.ffn_gate.weight"), vec![FFN, EMBD]));
+            shapes.push((format!("blk.{b}.ffn_up.weight"), vec![FFN, EMBD]));
+            shapes.push((format!("blk.{b}.ffn_down.weight"), vec![EMBD, FFN]));
+        }
+        let tensors: Vec<(String, _)> =
+            shapes.into_iter().map(|(n, shape)| (n, rand_q(&shape))).collect();
+        let metadata = [
+            ("general.architecture", gguf_file::Value::String("lfm2".to_string())),
+            ("lfm2.attention.head_count", gguf_file::Value::U32(2)),
+            (
+                "lfm2.attention.head_count_kv",
+                gguf_file::Value::Array(vec![gguf_file::Value::U32(0), gguf_file::Value::U32(1)]),
+            ),
+            ("lfm2.embedding_length", gguf_file::Value::U32(EMBD as u32)),
+            ("lfm2.context_length", gguf_file::Value::U32(256)),
+            ("lfm2.block_count", gguf_file::Value::U32(2)),
+            ("lfm2.attention.layer_norm_rms_epsilon", gguf_file::Value::F32(1e-5)),
+            ("lfm2.shortconv.l_cache", gguf_file::Value::U32(L_CACHE as u32)),
+        ];
+
+        let model_path = dir.join("tiny-lfm2.gguf");
+        let tokenizer_path = dir.join("tiny-lfm2.tokenizer.json");
+        write_gguf(&model_path, &metadata, &tensors);
+        write_tokenizer(&tokenizer_path, true);
+        (
+            model_path.to_string_lossy().into_owned(),
+            tokenizer_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[test]
+    fn generates_end_to_end_with_lfm2_gguf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, tokenizer) = write_tiny_lfm2(tmp.path());
+        let mut engine = SlmEngine::new(&model, &tokenizer).unwrap();
+        assert!(matches!(engine.model, ModelWeights::Lfm2(_)));
+        assert_eq!(engine.bos_id, Some(0));
+
+        let prompt = chatml_prompt("w5 w6", "w7 w8 w9");
+        let first = engine.generate(&prompt, 12, None).unwrap();
+        assert!(first.prompt_tokens > 0);
+        assert!(first.output_tokens <= 12);
+
+        // A different prompt in between must not leak conv/KV state into the rerun.
+        engine.generate(&chatml_prompt("w20", "w21 w22 w23 w24"), 8, None).unwrap();
+        let again = engine.generate(&prompt, 12, None).unwrap();
+        assert_eq!(first.text, again.text);
+        assert_eq!(first.output_tokens, again.output_tokens);
     }
 
     #[test]

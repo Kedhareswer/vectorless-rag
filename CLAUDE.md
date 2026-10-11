@@ -163,7 +163,7 @@ Intent → fetch strategy:
 - Cost via `estimate_cost(model_id, input_tokens, output_tokens)` in `chat_handler.rs`
 
 ## Known Limitations
-- **SLM inference quality**: Qwen2.5 0.5B is tiny — summaries and entity extraction are approximate. Works well for enrichment terms, not for user-facing answers.
+- **SLM inference quality**: default local model is Liquid LFM2.5-230M (QAD Q4_0, ~150 MB; LFM2.5-350M and Qwen2.5-0.5B also offered). Good for enrichment terms; summaries/entities are approximate and never user-facing answers.
 - **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
 - **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. Scanned PDFs need OCR, which is not compiled in (tesseract / oar-ocr features are heavy).
 
@@ -244,7 +244,7 @@ src-tauri/src/
   llm/
     provider.rs             — LLMProvider trait, Message, LLMResponse, ProviderConfig
     retry.rs                — RetryProvider (exponential backoff)
-    slm.rs                  — candle in-process GGUF inference (qwen2/llama arch; weights loaded once)
+    slm.rs                  — candle in-process GGUF inference (lfm2/qwen2/llama arch; weights loaded once)
     local.rs                — model download/management, delegates inference to slm.rs
     anthropic.rs            — Anthropic (real SSE streaming)
     openai_compat.rs        — OpenAI, DeepSeek, xAI, Qwen, AgentRouter

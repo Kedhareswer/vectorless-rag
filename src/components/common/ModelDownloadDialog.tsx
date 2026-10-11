@@ -37,7 +37,13 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
   } = useLocalModelStore();
 
   useEffect(() => {
-    getModelOptions().then(setOptions).catch(() => {});
+    getModelOptions()
+      .then((opts) => {
+        setOptions(opts);
+        // The backend lists the recommended model first.
+        setSelectedId((current) => current ?? opts[0]?.id ?? null);
+      })
+      .catch(() => {});
     refreshStatus();
     listDocuments().then(setExistingDocs).catch(() => {});
   }, [refreshStatus]);
