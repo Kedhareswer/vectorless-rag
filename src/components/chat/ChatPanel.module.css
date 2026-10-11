@@ -273,15 +273,6 @@
   margin: 12px 0;
 }
 
-/* Thinking steps group */
-
-.stepsGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 0;
-}
-
 /* Exploring indicator */
 
 .exploringIndicator {

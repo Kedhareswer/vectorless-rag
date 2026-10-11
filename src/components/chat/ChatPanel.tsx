@@ -8,7 +8,8 @@ import { useChatStore, type ExplorationStep, type ChatMessage } from '../../stor
 import { useDocumentsStore } from '../../stores/documents';
 import { useSettingsStore } from '../../stores/settings';
 import { chatWithAgent, abortQuery, type ChatEvent } from '../../lib/tauri';
-import { ThinkingBlock } from './ThinkingBlock';
+import { ProcessSummary } from './ProcessSummary';
+import { MessageActions } from './MessageActions';
 import { DictationButton } from './DictationButton';
 import styles from './ChatPanel.module.css';
 
@@ -260,24 +261,19 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
                         </div>
                       </div>
                     ) : (
-                      <div className={styles.assistantRow}>
+                      <div className={clsx(styles.assistantRow, 'answer-row')}>
                         <div className={styles.assistantContent}>
                           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
                             {msg.content}
                           </ReactMarkdown>
+                          <MessageActions content={msg.content} />
                         </div>
                       </div>
                     )}
 
                     {i === lastUserIdx && (
                       <>
-                        {explorationSteps.length > 0 && (
-                          <div className={styles.stepsGroup}>
-                            {explorationSteps.map((step) => (
-                              <ThinkingBlock key={step.stepNumber} step={step} />
-                            ))}
-                          </div>
-                        )}
+                        <ProcessSummary steps={explorationSteps} active={isExploring} />
 
                         {isExploring && explorationSteps.length === 0 && !streamingContent && (
                           <div className={styles.exploringIndicator}>

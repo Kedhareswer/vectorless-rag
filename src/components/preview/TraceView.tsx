@@ -4,51 +4,13 @@ import {
   Zap,
   Clock,
   Check,
-  BookOpen,
-  Search,
-  FileText,
-  List,
-  Cpu,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useChatStore } from '../../stores/chat';
 import type { ExplorationStep } from '../../stores/chat';
+import { getStepMeta } from '../../lib/pipelineSteps';
+import { formatCost, formatLatency } from '../../lib/format';
 import styles from './TraceView.module.css';
-
-/** Map deterministic fetch operation names to human-friendly labels */
-function getStepLabel(tool: string): string {
-  switch (tool) {
-    case 'tree_overview': return 'Reading structure';
-    case 'search': return 'Searching content';
-    case 'expand': return 'Reading section';
-    case 'scan_lists': return 'Scanning lists & tables';
-    case 'llm_call': return 'Generating answer';
-    default: return tool;
-  }
-}
-
-function getStepIcon(tool: string) {
-  switch (tool) {
-    case 'tree_overview': return FileText;
-    case 'search': return Search;
-    case 'expand': return BookOpen;
-    case 'scan_lists': return List;
-    case 'llm_call': return Cpu;
-    default: return FileText;
-  }
-}
-
-/** Format milliseconds into a human-friendly string */
-function formatLatency(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-/** Format cost to dollars */
-function formatCost(cost: number): string {
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
-}
 
 interface StepItemProps {
   step: ExplorationStep;
@@ -63,8 +25,8 @@ function StepItem({ step }: StepItemProps) {
       <div className={styles.stepNumber}>{step.stepNumber}</div>
       <div className={styles.stepBody}>
         <div className={styles.toolRow}>
-          {(() => { const Icon = getStepIcon(step.tool); return <Icon size={12} />; })()}
-          <span className={styles.toolName}>{getStepLabel(step.tool)}</span>
+          {(() => { const Icon = getStepMeta(step.tool).icon; return <Icon size={12} />; })()}
+          <span className={styles.toolName}>{getStepMeta(step.tool).label}</span>
           {step.status === 'running' ? (
             <span className={styles.statusRunning} title="Running" />
           ) : (
