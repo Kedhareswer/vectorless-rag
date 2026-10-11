@@ -167,6 +167,12 @@ Result    6 steps · 2,398 tokens · $0.0078 · 6.6s
 
 **Local-first** — All data in SQLite in the system app data directory. No telemetry, no cloud dependency. Documents do not leave the machine.
 
+**Layout-aware PDF parsing** — The native LiteParse engine (PDFium) turns each page into headings, paragraphs, lists, tables and code, mapped straight into the document tree with page numbers.
+
+**Small local models** — Optional ~150 MB Liquid LFM2.5 model for offline query enrichment, run in-process on the CPU.
+
+**Offline dictation** — Mic button in the chat box transcribes speech with Whisper (tiny.en, ~42 MB) entirely on-device.
+
 **Light and dark themes** — System preference detected automatically with a manual override via CSS custom properties.
 
 ---

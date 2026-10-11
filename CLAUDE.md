@@ -162,10 +162,18 @@ Intent → fetch strategy:
 - `StepRecord`: one per pipeline step
 - Cost via `estimate_cost(model_id, input_tokens, output_tokens)` in `chat_handler.rs`
 
+### Dictation (offline Whisper)
+- Mic button (`chat/DictationButton.tsx`) records via `lib/audio.ts` (Web Audio → 16 kHz mono f32), store `stores/dictation.ts`
+- `transcribe_audio` → `llm/dictation.rs`: candle Whisper, greedy English decode, 30 s windows, non-speech windows dropped, 5 min cap
+- Models download on first use to `<app-data>/models/dictation/<id>/`: Whisper tiny.en Q8 (~42 MB, default) or base.en (~290 MB)
+- Not part of the query pipeline: it only fills the chat input
+
 ## Known Limitations
 - **SLM inference quality**: default local model is Liquid LFM2.5-230M (QAD Q4_0, ~150 MB; LFM2.5-350M and Qwen2.5-0.5B also offered). Good for enrichment terms; summaries/entities are approximate and never user-facing answers.
 - **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
 - **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. Scanned PDFs need OCR, which is not compiled in (tesseract / oar-ocr features are heavy).
+
+- **Dictation platforms**: release builds target Windows (WebView2 asks for mic permission). macOS would need `NSMicrophoneUsageDescription`; Linux WebKitGTK may not expose `getUserMedia`.
 
 ## UI Design
 
@@ -246,6 +254,7 @@ src-tauri/src/
     retry.rs                — RetryProvider (exponential backoff)
     slm.rs                  — candle in-process GGUF inference (lfm2/qwen2/llama arch; weights loaded once)
     local.rs                — model download/management, delegates inference to slm.rs
+    dictation.rs            — offline Whisper speech-to-text (model catalog, download, transcribe)
     anthropic.rs            — Anthropic (real SSE streaming)
     openai_compat.rs        — OpenAI, DeepSeek, xAI, Qwen, AgentRouter
     groq.rs, google.rs, openrouter.rs
@@ -261,7 +270,9 @@ src/
     settings.ts             — provider configs, active provider
     theme.ts                — light/dark theme management
     localModel.ts           — local model download state
+    dictation.ts            — dictation model status, recording/transcribing phase
   lib/tauri.ts              — typed invoke wrappers for all Tauri commands
+  lib/audio.ts              — mic recording + downsampling to 16 kHz
   components/
     common/TopBar.tsx         — top navigation bar with ConversationSwitcher + icon buttons
     common/ConversationSwitcher.tsx — conversation dropdown (replaces sidebar chats tab)
@@ -270,6 +281,7 @@ src/
     common/ModelDownloadDialog.tsx
     chat/ChatPanel.tsx        — message input, handleSend, event handler, ThinkingBlock list
     chat/ThinkingBlock.tsx    — renders one pipeline step
+    chat/DictationButton.tsx  — mic button + first-use model download prompt
     preview/DocsPanel.tsx     — per-conversation document list (slide-over)
     preview/TracePanel.tsx    — trace/cost panel (slide-over)
     preview/TreeView.tsx, CanvasView.tsx, TraceView.tsx, RelationsView.tsx

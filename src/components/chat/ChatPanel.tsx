@@ -9,6 +9,7 @@ import { useDocumentsStore } from '../../stores/documents';
 import { useSettingsStore } from '../../stores/settings';
 import { chatWithAgent, abortQuery, type ChatEvent } from '../../lib/tauri';
 import { ThinkingBlock } from './ThinkingBlock';
+import { DictationButton } from './DictationButton';
 import styles from './ChatPanel.module.css';
 
 interface ChatPanelProps {
@@ -353,6 +354,13 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
               onKeyDown={handleKeyDown}
               rows={1}
               aria-label="Message input"
+              disabled={isExploring || !activeConversationId}
+            />
+            <DictationButton
+              onTranscript={(text) => {
+                setInput((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
+                textareaRef.current?.focus();
+              }}
               disabled={isExploring || !activeConversationId}
             />
             {isExploring ? (

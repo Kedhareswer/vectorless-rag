@@ -367,18 +367,43 @@ pub async fn download_model(
                 return Ok(dest);
             }
 
+    let label = format!("Downloading {}...", model.name);
+    let downloaded = download_file(&model.url, &dest, &label, model.size_bytes, &progress_tx).await?;
+
+    let _ = progress_tx.send(DownloadProgress {
+        downloaded_bytes: downloaded,
+        total_bytes: downloaded,
+        percent: 100.0,
+        done: true,
+        error: None,
+        phase: "Complete".to_string(),
+    });
+
+    Ok(dest)
+}
+
+/// Stream `url` to `dest` (via a `.tmp` file, renamed when complete), sending
+/// progress updates labelled `label`. Never sends `done: true`; callers do
+/// that once all of their files are in place. Returns the bytes written.
+pub async fn download_file(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    size_hint: u64,
+    progress_tx: &mpsc::UnboundedSender<DownloadProgress>,
+) -> Result<u64, String> {
     let _ = progress_tx.send(DownloadProgress {
         downloaded_bytes: 0,
         total_bytes: 0,
         percent: 0.0,
         done: false,
         error: None,
-        phase: format!("Downloading {}...", model.name),
+        phase: label.to_string(),
     });
 
     let client = reqwest::Client::new();
     let response = client
-        .get(&model.url)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("Download request failed: {}", e))?;
@@ -390,10 +415,11 @@ pub async fn download_model(
         ));
     }
 
-    let total = response.content_length().unwrap_or(model.size_bytes);
+    let total = response.content_length().unwrap_or(size_hint);
     let mut downloaded: u64 = 0;
 
-    let tmp_dest = dir.join(format!("{}.tmp", model.filename));
+    let file_name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("download");
+    let tmp_dest = dest.with_file_name(format!("{}.tmp", file_name));
     let mut file = tokio::fs::File::create(&tmp_dest)
         .await
         .map_err(|e| format!("Failed to create file: {}", e))?;
@@ -419,7 +445,7 @@ pub async fn download_model(
             percent,
             done: false,
             error: None,
-            phase: format!("Downloading {}...", model.name),
+            phase: label.to_string(),
         });
     }
 
@@ -436,12 +462,12 @@ pub async fn download_model(
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Rename tmp -> final. Fallback to copy+delete on Windows if rename fails.
-    if let Err(rename_err) = tokio::fs::rename(&tmp_dest, &dest).await {
+    if let Err(rename_err) = tokio::fs::rename(&tmp_dest, dest).await {
         eprintln!(
             "Rename failed ({}), falling back to copy+delete",
             rename_err
         );
-        tokio::fs::copy(&tmp_dest, &dest)
+        tokio::fs::copy(&tmp_dest, dest)
             .await
             .map_err(|e| {
                 format!(
@@ -452,16 +478,7 @@ pub async fn download_model(
         let _ = tokio::fs::remove_file(&tmp_dest).await;
     }
 
-    let _ = progress_tx.send(DownloadProgress {
-        downloaded_bytes: downloaded,
-        total_bytes: total,
-        percent: 100.0,
-        done: true,
-        error: None,
-        phase: "Complete".to_string(),
-    });
-
-    Ok(dest)
+    Ok(downloaded)
 }
 
 /// Delete the downloaded model, unload the engine, and clear settings.

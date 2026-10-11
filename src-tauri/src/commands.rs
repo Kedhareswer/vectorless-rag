@@ -13,6 +13,7 @@ use crate::document::metadata::enrich_tree_metadata;
 use crate::document::parser::get_parser_for_file;
 use crate::document::tree::{DocumentTree, RichNodeSummary, TreeNode, TreeNodeSummary};
 use crate::document::image::extract_images_from_path;
+use crate::llm::dictation;
 use crate::llm::local::{self, DownloadProgress, LocalModelStatus, ModelOption};
 use crate::llm::provider::ProviderConfig;
 use crate::validation;
@@ -483,6 +484,69 @@ pub fn delete_local_model(
     let app_data = app.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     local::delete_local_model(&app_data, &db)
+}
+
+// ── Dictation (offline Whisper) ──────────────────────────────────────
+
+#[tauri::command]
+pub fn get_dictation_options() -> Vec<dictation::DictationModelOption> {
+    dictation::get_options()
+}
+
+#[tauri::command]
+pub fn check_dictation_model(
+    app: tauri::AppHandle,
+    db: State<Database>,
+) -> Result<dictation::DictationStatus, String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    Ok(dictation::status(&app_data, &db))
+}
+
+#[tauri::command]
+pub async fn download_dictation_model(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    on_progress: Channel<DownloadProgress>,
+    model_id: String,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DownloadProgress>();
+    let forwarder = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let _ = on_progress.send(progress);
+        }
+    });
+    let result = dictation::download(&app_data, &db, &model_id, tx).await;
+    let _ = forwarder.await;
+    result
+}
+
+#[tauri::command]
+pub fn delete_dictation_model(
+    app: tauri::AppHandle,
+    db: State<Database>,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    dictation::delete(&app_data, &db)
+}
+
+/// Transcribe 16 kHz mono PCM samples recorded by the frontend.
+#[tauri::command]
+pub async fn transcribe_audio(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    samples: Vec<f32>,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let model_id = dictation::selected_model(&db)
+        .ok_or("No dictation model downloaded.")?;
+    tokio::task::spawn_blocking(move || dictation::transcribe(&app_data, &model_id, &samples))
+        .await
+        .map_err(|e| format!("Transcription task failed: {}", e))?
 }
 
 // --- Re-enrich command ---

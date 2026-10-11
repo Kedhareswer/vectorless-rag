@@ -7313,6 +7313,7 @@ dependencies = [
  "async-trait",
  "calamine",
  "candle-core",
+ "candle-nn",
  "candle-transformers",
  "chrono",
  "csv",

@@ -226,6 +226,36 @@ export const downloadLocalModel = (
 };
 export const deleteLocalModel = () => invoke<void>('delete_local_model');
 
+// Dictation (offline Whisper speech-to-text)
+export interface DictationModelOption {
+  id: string;
+  name: string;
+  description: string;
+  size_bytes: number;
+  size_label: string;
+}
+
+export interface DictationStatus {
+  downloaded: boolean;
+  model_id: string | null;
+  loaded: boolean;
+}
+
+export const getDictationOptions = () => invoke<DictationModelOption[]>('get_dictation_options');
+export const checkDictationModel = () => invoke<DictationStatus>('check_dictation_model');
+export const downloadDictationModel = (
+  modelId: string,
+  onProgress: (progress: DownloadProgress) => void,
+) => {
+  const channel = new Channel<DownloadProgress>();
+  channel.onmessage = onProgress;
+  return invoke<void>('download_dictation_model', { modelId, onProgress: channel });
+};
+export const deleteDictationModel = () => invoke<void>('delete_dictation_model');
+/** Transcribe 16 kHz mono PCM samples. */
+export const transcribeAudio = (samples: Float32Array) =>
+  invoke<string>('transcribe_audio', { samples: Array.from(samples) });
+
 // Cross-doc relations
 export interface CrossDocRelation {
   id: string;
