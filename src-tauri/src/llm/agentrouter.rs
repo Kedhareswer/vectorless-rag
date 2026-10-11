@@ -115,16 +115,13 @@ impl LLMProvider for AgentRouterProvider {
 
                     // Append to the last user message if it already contains tool_result blocks,
                     // otherwise start a new user message.
-                    if let Some(last) = anthropic_messages.last_mut() {
-                        if last["role"] == "user" {
-                            if let Some(arr) = last["content"].as_array_mut() {
-                                if arr.iter().any(|b| b["type"] == "tool_result") {
+                    if let Some(last) = anthropic_messages.last_mut()
+                        && last["role"] == "user"
+                            && let Some(arr) = last["content"].as_array_mut()
+                                && arr.iter().any(|b| b["type"] == "tool_result") {
                                     arr.push(result_block);
                                     continue;
                                 }
-                            }
-                        }
-                    }
                     anthropic_messages.push(json!({
                         "role": "user",
                         "content": [result_block],

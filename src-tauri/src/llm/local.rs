@@ -243,7 +243,7 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
     let model_id = db.get_setting("local_model_id").ok().flatten();
     let model_path = db.get_setting("local_model_path").ok().flatten();
 
-    if let (Some(ref id), Some(ref path)) = (&model_id, &model_path) {
+    if let (Some(id), Some(path)) = (&model_id, &model_path) {
         let p = Path::new(path);
         if p.exists() {
             let size = std::fs::metadata(p).map(|m| m.len()).ok();
@@ -263,8 +263,8 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
 
     // Scan models dir for any .gguf files (in case settings got cleared)
     let dir = models_dir(app_data);
-    if dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
+    if dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
@@ -285,7 +285,6 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
                 }
             }
         }
-    }
 
     LocalModelStatus {
         downloaded: false,
@@ -334,9 +333,9 @@ pub async fn download_model(
     // ── Phase 2: Download the GGUF model file ──
 
     // Skip if already exists and non-empty
-    if dest.exists() {
-        if let Ok(meta) = std::fs::metadata(&dest) {
-            if meta.len() > 0 {
+    if dest.exists()
+        && let Ok(meta) = std::fs::metadata(&dest)
+            && meta.len() > 0 {
                 let _ = progress_tx.send(DownloadProgress {
                     downloaded_bytes: meta.len(),
                     total_bytes: meta.len(),
@@ -347,8 +346,6 @@ pub async fn download_model(
                 });
                 return Ok(dest);
             }
-        }
-    }
 
     let _ = progress_tx.send(DownloadProgress {
         downloaded_bytes: 0,

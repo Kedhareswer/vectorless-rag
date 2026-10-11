@@ -372,11 +372,10 @@ fn fetch_list_extract(
                 NodeType::Table | NodeType::TableRow | NodeType::ListItem
             ) {
                 // Find the parent section rather than individual items
-                if let Some(parent_id) = find_parent_section_id_with_map(tree, id, &parent_map) {
-                    if !list_nodes.contains(&parent_id) {
+                if let Some(parent_id) = find_parent_section_id_with_map(tree, id, &parent_map)
+                    && !list_nodes.contains(&parent_id) {
                         list_nodes.push(parent_id);
                     }
-                }
             }
         }
 
@@ -484,8 +483,8 @@ fn build_parent_map(tree: &DocumentTree) -> HashMap<String, String> {
 fn find_section_title_with_map(tree: &DocumentTree, node_id: &str, parent_map: &HashMap<String, String>) -> String {
     let mut current = node_id.to_string();
     loop {
-        if let Some(node) = tree.get_node(&current) {
-            if matches!(node.node_type, NodeType::Section | NodeType::Heading | NodeType::Root) {
+        if let Some(node) = tree.get_node(&current)
+            && matches!(node.node_type, NodeType::Section | NodeType::Heading | NodeType::Root) {
                 let title = if node.content.len() > 80 {
                     format!("{}...", safe_truncate(&node.content, 80))
                 } else {
@@ -493,7 +492,6 @@ fn find_section_title_with_map(tree: &DocumentTree, node_id: &str, parent_map: &
                 };
                 return title;
             }
-        }
         match parent_map.get(&current) {
             Some(parent_id) => current = parent_id.clone(),
             None => break,
@@ -518,11 +516,10 @@ fn find_table_header_with_map(tree: &DocumentTree, node_id: &str, parent_map: &H
         loop {
             match parent_map.get(&current) {
                 Some(pid) => {
-                    if let Some(p) = tree.get_node(pid) {
-                        if matches!(p.node_type, NodeType::Table) {
+                    if let Some(p) = tree.get_node(pid)
+                        && matches!(p.node_type, NodeType::Table) {
                             break Some(pid.clone());
                         }
-                    }
                     current = pid.clone();
                 }
                 None => break None,
@@ -533,14 +530,13 @@ fn find_table_header_with_map(tree: &DocumentTree, node_id: &str, parent_map: &H
     let table_id = table_id?;
     let table = tree.get_node(&table_id)?;
 
-    if let Some(cols) = table.metadata.get("columns") {
-        if let Some(arr) = cols.as_array() {
+    if let Some(cols) = table.metadata.get("columns")
+        && let Some(arr) = cols.as_array() {
             let names: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
             if !names.is_empty() {
                 return Some(names.join(" | "));
             }
         }
-    }
 
     let children = tree.get_children(&table_id);
     for child in &children {
@@ -557,11 +553,10 @@ fn find_parent_section_id_with_map(tree: &DocumentTree, node_id: &str, parent_ma
     let mut current = node_id.to_string();
     loop {
         let parent_id = parent_map.get(&current)?;
-        if let Some(parent) = tree.get_node(parent_id) {
-            if matches!(parent.node_type, NodeType::Section | NodeType::Root) {
+        if let Some(parent) = tree.get_node(parent_id)
+            && matches!(parent.node_type, NodeType::Section | NodeType::Root) {
                 return Some(parent_id.clone());
             }
-        }
         current = parent_id.clone();
     }
 }

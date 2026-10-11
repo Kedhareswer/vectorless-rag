@@ -476,8 +476,8 @@ Working with: {label}"#,
 
     // ── Phase 6: Load conversation history ──────────────────────────
     let mut history_messages: Vec<Message> = Vec::new();
-    if let Some(ref cid) = conv_id {
-        if let Ok(records) = db.get_conversation_messages(cid) {
+    if let Some(ref cid) = conv_id
+        && let Ok(records) = db.get_conversation_messages(cid) {
             let relevant: Vec<_> = records.iter()
                 .filter(|r| !(r.role == "user" && r.content == message))
                 .collect();
@@ -493,7 +493,6 @@ Working with: {label}"#,
             }
             history_messages.reverse();
         }
-    }
 
     let mut messages: Vec<Message> = vec![
         Message::text("system", &system_prompt),

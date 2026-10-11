@@ -413,22 +413,20 @@ impl LLMProvider for AnthropicProvider {
                     // { index: N, delta: { type: "text_delta"|"input_json_delta", text|partial_json } }
                     match chunk["delta"]["type"].as_str() {
                         Some("text_delta") => {
-                            if let Some(text) = chunk["delta"]["text"].as_str() {
-                                if !text.is_empty() {
+                            if let Some(text) = chunk["delta"]["text"].as_str()
+                                && !text.is_empty() {
                                     let owned = text.to_string();
                                     let _ = token_tx.send(owned.clone());
                                     content_parts.push(owned);
                                 }
-                            }
                         }
                         Some("input_json_delta") => {
                             // Accumulate partial JSON args for tool_use blocks
                             let idx = chunk["index"].as_u64().unwrap_or(0) as usize;
-                            if let Some(entry) = tool_blocks.get_mut(&idx) {
-                                if let Some(partial) = chunk["delta"]["partial_json"].as_str() {
+                            if let Some(entry) = tool_blocks.get_mut(&idx)
+                                && let Some(partial) = chunk["delta"]["partial_json"].as_str() {
                                     entry.2.push_str(partial);
                                 }
-                            }
                         }
                         _ => {}
                     }

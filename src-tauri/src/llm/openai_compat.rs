@@ -234,24 +234,22 @@ impl LLMProvider for OpenAICompatProvider {
             };
 
             // Extract usage from the final chunk (stream_options.include_usage)
-            if let Some(usage) = chunk.get("usage") {
-                if !usage.is_null() {
+            if let Some(usage) = chunk.get("usage")
+                && !usage.is_null() {
                     input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                     output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
                     tokens_used = usage["total_tokens"].as_u64().unwrap_or(0) as u32;
                 }
-            }
 
             let delta = &chunk["choices"][0]["delta"];
 
             // Content tokens
-            if let Some(text) = delta["content"].as_str() {
-                if !text.is_empty() {
+            if let Some(text) = delta["content"].as_str()
+                && !text.is_empty() {
                     let owned = text.to_string();
                     let _ = token_tx.send(owned.clone());
                     content_parts.push(owned);
                 }
-            }
 
             // Tool call deltas
             if let Some(tool_calls) = delta["tool_calls"].as_array() {

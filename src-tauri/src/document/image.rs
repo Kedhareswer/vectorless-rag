@@ -108,8 +108,8 @@ pub fn extract_images_from_docx(file_path: &str, doc_id: &str) -> Vec<ImageNode>
         }
 
         let out_path = out_dir.join(filename);
-        if let Ok(mut out_file) = std::fs::File::create(&out_path) {
-            if std::io::copy(&mut entry, &mut out_file).is_ok() {
+        if let Ok(mut out_file) = std::fs::File::create(&out_path)
+            && std::io::copy(&mut entry, &mut out_file).is_ok() {
                 let id = uuid::Uuid::new_v4().to_string();
                 images.push(ImageNode {
                     id,
@@ -119,7 +119,6 @@ pub fn extract_images_from_docx(file_path: &str, doc_id: &str) -> Vec<ImageNode>
                     dimensions: None,
                 });
             }
-        }
     }
 
     images
@@ -245,8 +244,8 @@ pub fn extract_images_from_pdf(file_path: &str, doc_id: &str) -> Vec<ImageNode> 
                         let filename = format!("img_{:04}.png", img_counter);
                         let out_path = out_dir.join(&filename);
                         let img = image::RgbImage::from_raw(width, height, stream_bytes.clone());
-                        if let Some(img) = img {
-                            if img.save(&out_path).is_ok() {
+                        if let Some(img) = img
+                            && img.save(&out_path).is_ok() {
                                 images.push(ImageNode {
                                     id: uuid::Uuid::new_v4().to_string(),
                                     path: out_path.to_string_lossy().to_string(),
@@ -255,7 +254,6 @@ pub fn extract_images_from_pdf(file_path: &str, doc_id: &str) -> Vec<ImageNode> 
                                     dimensions: Some((width, height)),
                                 });
                             }
-                        }
                         continue;
                     } else if is_gray && stream_bytes.len() == (width * height) as usize {
                         // Convert raw grayscale to PNG
@@ -263,8 +261,8 @@ pub fn extract_images_from_pdf(file_path: &str, doc_id: &str) -> Vec<ImageNode> 
                         let filename = format!("img_{:04}.png", img_counter);
                         let out_path = out_dir.join(&filename);
                         let img = image::GrayImage::from_raw(width, height, stream_bytes.clone());
-                        if let Some(img) = img {
-                            if img.save(&out_path).is_ok() {
+                        if let Some(img) = img
+                            && img.save(&out_path).is_ok() {
                                 images.push(ImageNode {
                                     id: uuid::Uuid::new_v4().to_string(),
                                     path: out_path.to_string_lossy().to_string(),
@@ -273,7 +271,6 @@ pub fn extract_images_from_pdf(file_path: &str, doc_id: &str) -> Vec<ImageNode> 
                                     dimensions: Some((width, height)),
                                 });
                             }
-                        }
                         continue;
                     } else {
                         continue; // unsupported raw format

@@ -15,12 +15,11 @@ use document::cache::TreeCache;
 /// Resolve the database path inside the platform app data directory.
 /// Falls back to current directory if unavailable.
 fn resolve_db_path() -> String {
-    if let Some(data_dir) = app_data_dir() {
-        if std::fs::create_dir_all(&data_dir).is_ok() {
+    if let Some(data_dir) = app_data_dir()
+        && std::fs::create_dir_all(&data_dir).is_ok() {
             let path = data_dir.join("vectorless-rag.db");
             return path.to_string_lossy().to_string();
         }
-    }
     "vectorless-rag.db".to_string()
 }
 

@@ -513,11 +513,10 @@ impl DocumentParser for PdfParser {
         // Try LiteParse first if available — better layout-aware extraction.
         // This is safe to call during ingest because metadata enrichment (the
         // slow part) now runs in the background, not here.
-        if super::liteparse::is_available() {
-            if let Ok(tree) = self.parse_with_liteparse(file_path) {
+        if super::liteparse::is_available()
+            && let Ok(tree) = self.parse_with_liteparse(file_path) {
                 return Ok(tree);
             }
-        }
 
         self.parse_with_pdf_extract(file_path)
     }
@@ -895,12 +894,11 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
                     cell_text.clear();
                 }
                 "tr" => {
-                    if !row_cells.is_empty() {
-                        if let Some(ref tid) = table_id.clone() {
+                    if !row_cells.is_empty()
+                        && let Some(ref tid) = table_id.clone() {
                             let row_node = TreeNode::new(NodeType::TableRow, row_cells.join(" | "));
                             let _ = tree.add_node(tid, row_node);
                         }
-                    }
                     row_cells.clear();
                 }
                 "tbl" => { in_table = false; table_id = None; }

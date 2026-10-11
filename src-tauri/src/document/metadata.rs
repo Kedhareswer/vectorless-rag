@@ -48,8 +48,8 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
 
         // Hybrid entity extraction: heuristic regex + SLM (union of both)
         let mut entities = extract_entities(&content);
-        if use_slm {
-            if let Ok(slm_ents) = slm_entities(&content) {
+        if use_slm
+            && let Ok(slm_ents) = slm_entities(&content) {
                 for e in slm_ents {
                     if !entities.contains(&e) {
                         entities.push(e);
@@ -57,12 +57,11 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
                 }
                 entities.truncate(15);
             }
-        }
 
         // Hybrid topic extraction: heuristic TF + SLM
         let mut topics = extract_topics(&content);
-        if use_slm {
-            if let Ok(slm_tops) = slm_topics(&content) {
+        if use_slm
+            && let Ok(slm_tops) = slm_topics(&content) {
                 for t in slm_tops {
                     if !topics.contains(&t) {
                         topics.push(t);
@@ -70,7 +69,6 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
                 }
                 topics.truncate(8);
             }
-        }
 
         if let Some(node) = tree.nodes.get_mut(child_id) {
             // Only set summary if node doesn't already have one

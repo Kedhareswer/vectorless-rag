@@ -786,13 +786,12 @@ pub fn clear_app_data(
 
         // Also wipe the llama-server binary on full reset (unlike "Remove model" which keeps it)
         let bdir = local::bin_dir(&app_data);
-        if bdir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&bdir) {
+        if bdir.exists()
+            && let Ok(entries) = std::fs::read_dir(&bdir) {
                 for entry in entries.flatten() {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
-        }
 
         // Delete the SQLite database file(s) — the .db, .db-wal, .db-shm
         for suffix in &["vectorless-rag.db", "vectorless-rag.db-wal", "vectorless-rag.db-shm"] {
