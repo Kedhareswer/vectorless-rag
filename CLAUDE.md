@@ -44,7 +44,7 @@ Phase 1  Fast heuristic preprocess (sync, ~0ms)
 
 Phase 2  Cancel check
 
-Phase 3  LLM-powered query enrichment (3 parallel LLM calls via candle SLM)
+Phase 3  Local-SLM query enrichment (3 sequential calls via candle, in-process)
          3a. Query Rewrite  — search-optimized reformulation
          3b. HyDE           — hypothetical answer passage, extract terms
          3c. StepBack       — broader question, extract terms
@@ -73,7 +73,8 @@ Phase 8  Save full trace (preprocessing + fetch + LLM steps)
 
 **Critical pipeline rules:**
 - LLM NEVER gets tools. `provider.chat_stream(messages, None, token_tx)` — tools always `None`.
-- All 4 LLM calls (3 preprocessing + 1 final) use the same provider/model.
+- Enrichment runs on the local SLM (free, offline) and only when a model is loaded; the final answer uses the selected provider/model.
+- Each SLM generation is capped at 12s (partial text kept) and stops when the user cancels.
 - Preprocessing errors are non-fatal — step marked "Skipped", pipeline continues.
 - Content budget: **40,000 chars** per query (`CONTENT_BUDGET` in `deterministic.rs`).
 - Total UI steps: 3 preprocessing + N fetch steps + 1 `llm_call`.
@@ -91,8 +92,8 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 
 ## Tech Stack
 - **Desktop shell**: Tauri v2 (Rust backend + WebView frontend)
-- **Frontend**: React 19 + TypeScript + Vite
-- **Backend**: Rust (Tokio async runtime)
+- **Frontend**: React 19 + TypeScript 7 + Vite 8 (Vitest 5, Node 24 LTS in CI; Node ≥22.22.2 locally)
+- **Backend**: Rust, edition 2024 (Tokio async runtime)
 - **Database**: SQLite via `rusqlite` (document trees, traces, settings) — schema at V3
 - **Styling**: CSS custom properties + CSS modules, Inter font, JetBrains Mono for code
 - **State management**: Zustand stores (chat, documents, settings, theme, localModel)
@@ -107,7 +108,7 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **DeepSeek** — DeepSeek Chat, DeepSeek Reasoner
 - **xAI / Grok** — Grok 3, Grok 3 Mini
 - **Qwen** — Qwen Max, Qwen Plus, Qwen Turbo
-- **Ollama** — Local models; **download works, inference is a stub**
+- **Ollama** — Any model served by a local Ollama; NDJSON token streaming, 16k context requested
 - All wrapped with `RetryProvider` for automatic retry on transient errors.
 - Unified `LLMProvider` trait: `chat()` + `chat_stream()` + `capabilities()`
 
@@ -243,7 +244,7 @@ src-tauri/src/
   llm/
     provider.rs             — LLMProvider trait, Message, LLMResponse, ProviderConfig
     retry.rs                — RetryProvider (exponential backoff)
-    slm.rs                  — candle-based in-process GGUF inference (Qwen2.5)
+    slm.rs                  — candle in-process GGUF inference (qwen2/llama arch; weights loaded once)
     local.rs                — model download/management, delegates inference to slm.rs
     anthropic.rs            — Anthropic (real SSE streaming)
     openai_compat.rs        — OpenAI, DeepSeek, xAI, Qwen, AgentRouter
@@ -352,6 +353,6 @@ Full roadmap: `.planning/roadmap/`
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) — 3 jobs:
-- **Rust**: clippy + `cargo test --lib`
-- **Frontend**: `tsc --noEmit` + `vitest run` + `vite build`
-- **Release**: Windows MSI/EXE via git tags (auto-versioning)
+- **Rust**: `cargo clippy --all-targets -- -D warnings` + `cargo test --lib`
+- **Frontend** (Node 24): `tsc --noEmit` + `vitest run` + `vite build` + `npm audit --omit=dev --audit-level=high`
+- **Release** (push to main only, the only job with write permission): Windows MSI/EXE via git tags (auto-versioning)

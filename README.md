@@ -124,7 +124,7 @@ TGG implements a unified `LLMProvider` trait in Rust. Streaming, retry, and cost
 | **Qwen** | Qwen Max, Qwen Plus, Qwen Turbo | |
 | **OpenRouter** | 100+ models | Single key for Claude, GPT, Llama, Mistral, and more |
 | **AgentRouter** | GPT-5, DeepSeek, GLM | Automatic model routing |
-| **Ollama** | Any locally-served model | Download works; inference is a stub |
+| **Ollama** | Any locally-served model | Token streaming; requests a 16k context |
 
 Per-token pricing is embedded for 40+ models. Every query shows exact input/output token counts with cost.
 
@@ -202,8 +202,8 @@ Rust + Tokio
 | Layer | Technology |
 | :--- | :--- |
 | Desktop shell | Tauri v2 |
-| Frontend | React 19, TypeScript, Vite |
-| Backend | Rust, Tokio async runtime |
+| Frontend | React 19, TypeScript 7, Vite 8, Vitest 5 |
+| Backend | Rust (edition 2024), Tokio async runtime |
 | Database | SQLite via `rusqlite`, WAL mode |
 | State management | Zustand v5 |
 | Styling | CSS Modules, CSS custom properties |
@@ -215,7 +215,7 @@ Rust + Tokio
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) 18 or later
+- [Node.js](https://nodejs.org/) 24 LTS (or 22.22.2+)
 - [Rust](https://rustup.rs/) stable toolchain
 - Platform build tools — see [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/)
 

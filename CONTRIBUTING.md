@@ -24,7 +24,7 @@ If you are new to Tauri, working through the [Tauri v2 quickstart](https://v2.ta
 
 | Requirement | Version | Link |
 | :--- | :--- | :--- |
-| Node.js | 18 or later | https://nodejs.org |
+| Node.js | 24 LTS (or 22.22.2+) | https://nodejs.org |
 | Rust | stable toolchain | https://rustup.rs |
 | Platform build tools | — | https://v2.tauri.app/start/prerequisites/ |
 

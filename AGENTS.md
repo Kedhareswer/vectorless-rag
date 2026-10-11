@@ -16,7 +16,10 @@ This file provides guidance to agents when working with code in this repository.
 - `llm/slm.rs` — candle-based GGUF inference, replaces the old llama-server sidecar
 - `llm/local.rs` — model download/management, delegates inference to `slm.rs`
 - Metadata enrichment runs in the background after ingest (non-blocking)
-- GGUF metadata remap handles Qwen2 architecture (synthesizes `rope.dimension_count`)
+- Dispatches on GGUF `general.architecture`: `qwen2` → `quantized_qwen2` (keeps Q/K/V biases), `llama` → `quantized_llama`
+- Weights load once (background thread at startup); KV cache resets per call (`index_pos == 0`)
+- Models return last-position logits shaped `[1, vocab]` — use `last_token_logits()`, never index the vocab dim
+- Calls serialise on one engine mutex; each is time-capped (12s) and cancellable via `local::generate(.., Some(&cancel))`
 
 ## Document Scoping (Critical Gotcha)
 
