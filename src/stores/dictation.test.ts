@@ -7,6 +7,7 @@ vi.mock('../lib/tauri', () => ({
   checkDictationModel: vi.fn(),
   getDictationOptions: vi.fn(),
   downloadDictationModel: vi.fn(),
+  deleteDictationModel: vi.fn(),
   transcribeAudio: vi.fn(),
 }));
 
@@ -78,6 +79,15 @@ describe('DictationStore', () => {
     await useDictationStore.getState().startRecording();
     expect(await useDictationStore.getState().stopAndTranscribe()).toBe('');
     expect(useDictationStore.getState().error).toContain('model missing');
+  });
+
+  it('remove deletes the model and refreshes status', async () => {
+    vi.mocked(tauri.deleteDictationModel).mockResolvedValue(undefined);
+    vi.mocked(tauri.checkDictationModel).mockResolvedValue({ downloaded: false, model_id: null, loaded: false });
+    useDictationStore.setState({ status: { downloaded: true, model_id: 'whisper-tiny-en-q8', loaded: true } });
+    await useDictationStore.getState().remove();
+    expect(tauri.deleteDictationModel).toHaveBeenCalled();
+    expect(useDictationStore.getState().status?.downloaded).toBe(false);
   });
 
   it('cancelRecording discards audio', async () => {

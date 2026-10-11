@@ -9,19 +9,33 @@ import {
   AlertCircle,
   Server,
   Palette,
-  SlidersHorizontal,
   Cpu,
+  Database,
   TriangleAlert,
+  type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useSettingsStore, type ProviderConfig } from '../../stores/settings';
 import { useThemeStore } from '../../stores/theme';
 import { ModelDownloadDialog } from '../common/ModelDownloadDialog';
+import { LocalAISettings } from './LocalAISettings';
 import { clearAppData } from '../../lib/tauri';
 import styles from './SettingsModal.module.css';
 
+/** Settings sections, in nav order. Add a section here and render it below. */
+export const SETTINGS_SECTIONS = [
+  { id: 'providers', label: 'Providers', icon: Server },
+  { id: 'local-ai', label: 'Local AI', icon: Cpu },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'data', label: 'Data', icon: Database },
+] as const satisfies readonly { id: string; label: string; icon: LucideIcon }[];
+
+export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
+
 interface SettingsModalProps {
   onClose: () => void;
+  /** Section to open on. */
+  initialSection?: SettingsSectionId;
 }
 
 type ProviderPreset =
@@ -37,7 +51,7 @@ type ProviderPreset =
   | 'qwen'
   | 'openai-compat';
 
-/** Models that have a fixed dropdown (provider -> model list) */
+/** Suggested model IDs per provider. Any other ID can be typed in. */
 const PROVIDER_MODELS: Partial<Record<ProviderPreset, string[]>> = {
   google: [
     'gemini-2.5-flash',
@@ -46,6 +60,9 @@ const PROVIDER_MODELS: Partial<Record<ProviderPreset, string[]>> = {
     'gemini-2.0-pro',
   ],
   anthropic: [
+    'claude-sonnet-5-5',
+    'claude-opus-5-5',
+    'claude-haiku-5-5',
     'claude-haiku-4-5-20251001',
     'claude-sonnet-4-6',
     'claude-opus-4-6',
@@ -150,12 +167,11 @@ function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-export function SettingsModal({ onClose }: SettingsModalProps) {
+export function SettingsModal({ onClose, initialSection = 'providers' }: SettingsModalProps) {
+  const [section, setSection] = useState<SettingsSectionId>(initialSection);
   const {
     providers: savedProviders,
-    maxExplorationSteps,
     error,
-    setMaxSteps,
     saveProviderToBackend,
     deleteProviderFromBackend,
     setActiveProvider,
@@ -170,7 +186,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     savedProviders.map((p) => ({ ...p }))
   );
   const [isSaving, setIsSaving] = useState(false);
-  const [localSteps, setLocalSteps] = useState(maxExplorationSteps);
   const [showModelDialog, setShowModelDialog] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
@@ -302,7 +317,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         setActiveProvider(activeProvider.id);
       }
 
-      setMaxSteps(localSteps);
       onClose();
     } catch (err) {
       console.warn('Failed to save settings:', err);
@@ -330,6 +344,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     }
   };
 
+  const isDirty = JSON.stringify(draftProviders) !== JSON.stringify(savedProviders);
+  const activeSection = SETTINGS_SECTIONS.find((sec) => sec.id === section) ?? SETTINGS_SECTIONS[0];
+
   return (
     <div
       ref={overlayRef}
@@ -342,35 +359,52 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       tabIndex={-1}
     >
       <div className={styles.modal}>
-        {/* Header */}
         <div className={styles.header}>
           <span className={styles.title}>Settings</span>
           <button
             className={styles.closeButton}
             onClick={onClose}
             title="Close"
+            aria-label="Close settings"
             type="button"
           >
             <X size={16} />
           </button>
         </div>
 
-        {/* Body */}
-        <div className={styles.body}>
-          {error && (
-            <div className={styles.errorBanner}>
-              <AlertCircle size={14} />
-              <span>{error}</span>
-            </div>
-          )}
+        <div className={styles.layout}>
+          <nav className={styles.nav} aria-label="Settings sections">
+            {SETTINGS_SECTIONS.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className={clsx(styles.navItem, section === id && styles.navItemActive)}
+                onClick={() => setSection(id)}
+                aria-current={section === id ? 'page' : undefined}
+              >
+                <Icon size={14} />
+                <span>{label}</span>
+                {id === 'providers' && isDirty && <span className={styles.navDot} aria-label="Unsaved changes" />}
+              </button>
+            ))}
+          </nav>
 
-          {/* Providers Section */}
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>
-              <Server size={14} className={styles.sectionIcon} />
-              <span>LLM Providers</span>
-            </div>
+          <div className={styles.body}>
+            <h2 className={styles.sectionHeading}>{activeSection.label}</h2>
 
+            {error && (
+              <div className={styles.errorBanner}>
+                <AlertCircle size={14} />
+                <span>{error}</span>
+              </div>
+            )}
+
+            {section === 'providers' && (
+              <>
+                <p className={styles.sectionDesc}>
+                  The model that writes answers. API keys are stored in your OS keychain. The active
+                  provider can also be switched from the chat box.
+                </p>
             <div className={styles.providerCards}>
               {draftProviders.map((provider) => (
                 <div key={provider.id} className={styles.providerCard}>
@@ -455,30 +489,22 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
                     <div className={styles.field}>
                       <label className={styles.fieldLabel}>Model</label>
-                      {PROVIDER_MODELS[provider.name as ProviderPreset] ? (
-                        <select
-                          className={styles.fieldSelect}
-                          value={provider.model}
-                          onChange={(e) =>
-                            updateDraftProvider(provider.id, { model: e.target.value })
-                          }
-                          title="Select model"
-                        >
-                          {PROVIDER_MODELS[provider.name as ProviderPreset]!.map((m) => (
-                            <option key={m} value={m}>{m}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          type="text"
-                          className={styles.fieldInput}
-                          value={provider.model}
-                          onChange={(e) =>
-                            updateDraftProvider(provider.id, { model: e.target.value })
-                          }
-                          placeholder="Model name"
-                        />
-                      )}
+                      <input
+                        type="text"
+                        className={styles.fieldInput}
+                        value={provider.model}
+                        list={`models-${provider.id}`}
+                        onChange={(e) =>
+                          updateDraftProvider(provider.id, { model: e.target.value })
+                        }
+                        placeholder="Model ID"
+                        spellCheck={false}
+                      />
+                      <datalist id={`models-${provider.id}`}>
+                        {(PROVIDER_MODELS[provider.name as ProviderPreset] ?? []).map((m) => (
+                          <option key={m} value={m} />
+                        ))}
+                      </datalist>
                     </div>
 
                     <div className={clsx(styles.field, styles.fieldFull)}>
@@ -509,144 +535,84 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <span>Add Provider</span>
               </button>
             </div>
-          </div>
+              </>
+            )}
 
-          {/* Theme Section */}
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>
-              <Palette size={14} className={styles.sectionIcon} />
-              <span>Appearance</span>
-            </div>
+            {section === 'local-ai' && (
+              <LocalAISettings onManageEnrichmentModel={() => setShowModelDialog(true)} />
+            )}
 
-            <div className={styles.themeGroup}>
-              <button
-                type="button"
-                className={clsx(
-                  styles.themeOption,
-                  theme === 'light' && styles.themeOptionActive
-                )}
-                onClick={() => setTheme('light')}
-              >
-                <Sun size={14} />
-                <span>Light</span>
-              </button>
-              <button
-                type="button"
-                className={clsx(
-                  styles.themeOption,
-                  theme === 'dark' && styles.themeOptionActive
-                )}
-                onClick={() => setTheme('dark')}
-              >
-                <Moon size={14} />
-                <span>Dark</span>
-              </button>
-              <button
-                type="button"
-                className={clsx(
-                  styles.themeOption,
-                  theme === 'system' && styles.themeOptionActive
-                )}
-                onClick={() => setTheme('system')}
-              >
-                <Monitor size={14} />
-                <span>System</span>
-              </button>
-            </div>
-          </div>
+            {section === 'appearance' && (
+              <>
+                <p className={styles.sectionDesc}>Theme follows your system unless you pick one.</p>
+                <div className={styles.themeGroup} role="radiogroup" aria-label="Theme">
+                  {([
+                    ['light', 'Light', Sun],
+                    ['dark', 'Dark', Moon],
+                    ['system', 'System', Monitor],
+                  ] as const).map(([value, label, Icon]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={theme === value}
+                      className={clsx(styles.themeOption, theme === value && styles.themeOptionActive)}
+                      onClick={() => setTheme(value)}
+                    >
+                      <Icon size={14} />
+                      <span>{label}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
 
-          {/* Local Model Section */}
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>
-              <Cpu size={14} className={styles.sectionIcon} />
-              <span>Document Enrichment Model</span>
-            </div>
-            <p className={styles.sectionDesc}>
-              A small local AI model that generates summaries and metadata for document sections.
-            </p>
-            <button
-              type="button"
-              className={styles.addProviderButton}
-              onClick={() => setShowModelDialog(true)}
-            >
-              <Cpu size={16} />
-              <span>Manage Local Model</span>
-            </button>
-          </div>
-
-          {/* Exploration Section */}
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>
-              <SlidersHorizontal size={14} className={styles.sectionIcon} />
-              <span>Exploration</span>
-            </div>
-
-            <div className={styles.field}>
-              <label className={styles.fieldLabel}>
-                Max Exploration Steps
-              </label>
-              <div className={styles.sliderRow}>
-                <input
-                  type="range"
-                  className={styles.slider}
-                  min={1}
-                  max={20}
-                  value={localSteps}
-                  onChange={(e) => setLocalSteps(Number(e.target.value))}
-                  aria-label="Max exploration steps"
-                  title="Max exploration steps"
-                />
-                <span className={styles.sliderValue}>{localSteps}</span>
+            {section === 'data' && (
+              <div className={styles.dangerCard}>
+                <div className={styles.sectionTitle}>
+                  <TriangleAlert size={14} className={styles.sectionIcon} style={{ color: 'var(--error)' }} />
+                  <span>Reset app</span>
+                </div>
+                <p className={styles.sectionDesc}>
+                  Deletes all chats, documents, providers and downloaded models. The app returns to
+                  a clean first-run state. This cannot be undone.
+                </p>
+                <button
+                  type="button"
+                  className={styles.dangerButton}
+                  onClick={handleClearData}
+                  disabled={isClearing}
+                >
+                  <Trash2 size={14} />
+                  <span>
+                    {isClearing
+                      ? 'Clearing…'
+                      : clearConfirm
+                      ? 'Click again to confirm — this is irreversible'
+                      : 'Clear all app data'}
+                  </span>
+                </button>
               </div>
-            </div>
+            )}
           </div>
+        </div>
 
-          {/* Danger Zone */}
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>
-              <TriangleAlert size={14} className={styles.sectionIcon} style={{ color: 'var(--accent)' }} />
-              <span>Danger Zone</span>
-            </div>
-            <p className={styles.sectionDesc}>
-              Deletes all conversations, documents, providers, and the local model.
-              The app returns to a clean first-run state. This cannot be undone.
-            </p>
+        {(section === 'providers' || isDirty) && (
+          <div className={styles.footer}>
+            {isDirty && <span className={styles.footerHint}>Unsaved provider changes</span>}
+            <button className={styles.cancelButton} onClick={onClose} type="button">
+              {isDirty ? 'Discard' : 'Close'}
+            </button>
             <button
+              className={styles.saveButton}
+              onClick={handleSave}
+              disabled={isSaving || !isDirty}
               type="button"
-              className={styles.dangerButton}
-              onClick={handleClearData}
-              disabled={isClearing}
             >
-              <Trash2 size={14} />
-              <span>
-                {isClearing
-                  ? 'Clearing...'
-                  : clearConfirm
-                  ? 'Click again to confirm — this is irreversible'
-                  : 'Clear All App Data'}
-              </span>
+              {isSaving ? 'Saving…' : 'Save'}
             </button>
           </div>
-        </div>
-
-        {/* Footer */}
-        <div className={styles.footer}>
-          <button
-            className={styles.cancelButton}
-            onClick={onClose}
-            type="button"
-          >
-            Cancel
-          </button>
-          <button
-            className={styles.saveButton}
-            onClick={handleSave}
-            disabled={isSaving}
-            type="button"
-          >
-            {isSaving ? 'Saving...' : 'Save'}
-          </button>
-        </div>
+        )}
       </div>
 
       {showModelDialog && (

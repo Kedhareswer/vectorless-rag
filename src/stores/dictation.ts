@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   checkDictationModel,
+  deleteDictationModel,
   downloadDictationModel,
   getDictationOptions,
   transcribeAudio,
@@ -24,6 +25,8 @@ interface DictationState {
   refresh: () => Promise<void>;
   /** Download a dictation model (defaults to the recommended one). */
   download: (modelId?: string) => Promise<void>;
+  /** Delete downloaded dictation models. */
+  remove: () => Promise<void>;
   /** Start recording from the microphone. */
   startRecording: () => Promise<void>;
   /** Stop recording and transcribe. Resolves to the text ('' on failure). */
@@ -70,6 +73,15 @@ export const useDictationStore = create<DictationState>((set, get) => ({
       set({ status, isDownloading: false });
     } catch (err) {
       set({ error: String(err), isDownloading: false });
+    }
+  },
+
+  remove: async () => {
+    try {
+      await deleteDictationModel();
+      set({ status: await checkDictationModel(), progress: null });
+    } catch (err) {
+      set({ error: String(err) });
     }
   },
 

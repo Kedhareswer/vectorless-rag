@@ -10,7 +10,6 @@ vi.mock('../lib/tauri', () => ({
 const initialState = () => ({
   providers: [],
   activeProviderId: null,
-  maxExplorationSteps: 10,
   isLoading: false,
   error: null,
 });
@@ -26,7 +25,6 @@ describe('SettingsStore', () => {
     const state = useSettingsStore.getState();
     expect(state.providers).toEqual([]);
     expect(state.activeProviderId).toBeNull();
-    expect(state.maxExplorationSteps).toBe(10);
     expect(state.isLoading).toBe(false);
     expect(state.error).toBeNull();
   });
@@ -156,18 +154,6 @@ describe('SettingsStore', () => {
     const state = useSettingsStore.getState();
     expect(state.activeProviderId).toBeNull();
     expect(state.providers[0].isActive).toBe(false);
-  });
-
-  // ── setMaxSteps ────────────────────────────────────────────────
-
-  it('setMaxSteps updates maxExplorationSteps', () => {
-    useSettingsStore.getState().setMaxSteps(25);
-    expect(useSettingsStore.getState().maxExplorationSteps).toBe(25);
-  });
-
-  it('setMaxSteps can set to 1', () => {
-    useSettingsStore.getState().setMaxSteps(1);
-    expect(useSettingsStore.getState().maxExplorationSteps).toBe(1);
   });
 
   // ── clearError ─────────────────────────────────────────────────

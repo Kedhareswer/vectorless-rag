@@ -43,7 +43,6 @@ function toTauri(p: ProviderConfig): TauriProviderConfig {
 interface SettingsState {
   providers: ProviderConfig[];
   activeProviderId: string | null;
-  maxExplorationSteps: number;
   isLoading: boolean;
   error: string | null;
 
@@ -54,7 +53,6 @@ interface SettingsState {
   setActiveProvider: (id: string | null) => void;
   /** Make a configured provider the active one and persist the change. */
   activateProvider: (id: string) => Promise<void>;
-  setMaxSteps: (steps: number) => void;
   loadProviders: () => Promise<void>;
   saveProviderToBackend: (provider: ProviderConfig) => Promise<void>;
   deleteProviderFromBackend: (id: string) => Promise<void>;
@@ -64,7 +62,6 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   providers: [],
   activeProviderId: null,
-  maxExplorationSteps: 10,
   isLoading: false,
   error: null,
 
@@ -104,9 +101,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }));
   },
 
-  setMaxSteps: (steps: number) => {
-    set({ maxExplorationSteps: steps });
-  },
 
   loadProviders: async () => {
     set({ isLoading: true, error: null });
