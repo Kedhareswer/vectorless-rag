@@ -68,6 +68,17 @@ pub fn chat_inference(system: &str, user: &str, max_tokens: u32) -> Result<Strin
     slm::chat_inference(system, user, max_tokens)
 }
 
+/// Like `chat_inference`, but also reports token counts and can be cancelled.
+/// Blocking — must not be called from async context directly.
+pub fn generate(
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<slm::Generation, String> {
+    slm::generate(system, user, max_tokens, cancel)
+}
+
 // ── Directory helpers ─────────────────────────────────────────────────
 
 /// Resolve the legacy binary directory (kept for clear_app_data cleanup).

@@ -336,7 +336,7 @@ fn slm_classify_heading(line: &str, context: &str) -> Option<u32> {
     let user = format!(
         "Line: \"{}\"\nContext: \"{}\"",
         trimmed,
-        &context[..context.len().min(200)]
+        crate::util::safe_truncate(context, 200)
     );
 
     let result = match local::chat_inference(system, &user, 10) {
@@ -559,7 +559,7 @@ impl PdfParser {
 
                 if let Some(level) = detect_heading(trimmed) {
                     flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    let title = trimmed[..trimmed.len().min(80)].to_string();
+                    let title = crate::util::safe_truncate(trimmed, 80).to_string();
 
                     while section_stack.last().is_some_and(|(l, _)| *l >= level) {
                         section_stack.pop();
@@ -578,7 +578,7 @@ impl PdfParser {
                     current_parent = section_id;
                 } else if let Some(level) = slm_classify_heading(trimmed, &para_buffer) {
                     flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    let title = trimmed[..trimmed.len().min(80)].to_string();
+                    let title = crate::util::safe_truncate(trimmed, 80).to_string();
 
                     while section_stack.last().is_some_and(|(l, _)| *l >= level) {
                         section_stack.pop();

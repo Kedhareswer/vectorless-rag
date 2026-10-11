@@ -4,73 +4,98 @@
 //! candle-transformers. Zero external binaries needed at runtime.
 //!
 //! ## Lifecycle
-//!   1. `load_engine(model_path, tokenizer_path)` — loads GGUF + tokenizer.
+//!   1. `load_engine(model_path, tokenizer_path)` — loads GGUF weights + tokenizer once.
 //!   2. `chat_inference(system, user, max_tokens)` — runs inference.
 //!   3. `unload_engine()` — frees model memory.
 //!
-//! Each `chat_inference` call creates a fresh `ModelWeights` instance to get
-//! a clean KV cache. On SSD this adds ~0.3-0.8s overhead per call — acceptable
-//! for enrichment (which itself takes 2-5s for token generation).
+//! Weights stay resident between calls. The KV cache is reset at the start of
+//! every generation (candle's quantized models drop it when `index_pos == 0`),
+//! so calls are independent without re-reading the GGUF from disk.
+//!
+//! ## Supported architectures
+//! Dispatches on GGUF `general.architecture`:
+//!   - `qwen2` → `quantized_qwen2` (includes the Q/K/V attention biases Qwen needs)
+//!   - `llama` → `quantized_llama`
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_llama as qlm;
+use candle_transformers::models::quantized_llama as qllama;
+use candle_transformers::models::quantized_qwen2 as qqwen2;
+use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
-/// Remap GGUF metadata keys so `quantized_llama::ModelWeights::from_gguf` works
-/// with non-llama architectures (e.g. Qwen2). The function reads
-/// `general.architecture` and copies `{arch}.xxx` keys to `llama.xxx`.
-fn remap_gguf_metadata_for_llama(content: &mut gguf_file::Content) {
-    let arch = content
+/// Wall-clock cap for a single generation. Decoding stops here and the text
+/// produced so far is returned, so one slow call can't stall the pipeline.
+const GENERATION_TIME_LIMIT: Duration = Duration::from_secs(12);
+
+/// Penalise recently generated tokens — tiny models loop without it.
+const REPEAT_PENALTY: f32 = 1.1;
+const REPEAT_LAST_N: usize = 64;
+
+// ── Model weights per architecture ────────────────────────────────────
+
+enum ModelWeights {
+    Llama(qllama::ModelWeights),
+    Qwen2(qqwen2::ModelWeights),
+}
+
+impl ModelWeights {
+    fn load(model_path: &str, device: &Device) -> Result<Self, String> {
+        let mut file = std::fs::File::open(model_path)
+            .map_err(|e| format!("Failed to open model: {}", e))?;
+        let content = gguf_file::Content::read(&mut file)
+            .map_err(|e| format!("Invalid GGUF file: {}", e))?;
+        let arch = gguf_architecture(&content);
+
+        match arch.as_str() {
+            "qwen2" => qqwen2::ModelWeights::from_gguf(content, &mut file, device)
+                .map(Self::Qwen2)
+                .map_err(|e| format!("Failed to load qwen2 weights: {}", e)),
+            "llama" | "" => qllama::ModelWeights::from_gguf(content, &mut file, device)
+                .map(Self::Llama)
+                .map_err(|e| format!("Failed to load llama weights: {}", e)),
+            other => Err(format!("Unsupported model architecture: {}", other)),
+        }
+    }
+
+    /// Run the model; returns logits for the last input position.
+    fn forward(&mut self, input: &Tensor, index_pos: usize) -> candle_core::Result<Tensor> {
+        match self {
+            Self::Llama(m) => m.forward(input, index_pos),
+            Self::Qwen2(m) => m.forward(input, index_pos),
+        }
+    }
+}
+
+fn gguf_architecture(content: &gguf_file::Content) -> String {
+    content
         .metadata
         .get("general.architecture")
         .and_then(|v| v.to_string().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+        .cloned()
+        .unwrap_or_default()
+}
 
-    if arch == "llama" || arch.is_empty() {
-        return;
-    }
-
-    let src_prefix = format!("{}.", arch);
-    let dst_prefix = "llama.";
-
-    let remapped: Vec<(String, gguf_file::Value)> = content
-        .metadata
-        .iter()
-        .filter(|(k, _)| k.starts_with(&src_prefix))
-        .map(|(k, v)| {
-            let new_key = format!("{}{}", dst_prefix, &k[src_prefix.len()..]);
-            (new_key, v.clone())
-        })
-        .collect();
-
-    for (k, v) in remapped {
-        content.metadata.entry(k).or_insert(v);
-    }
-
-    // Synthesize llama.rope.dimension_count if absent — Qwen2 GGUF files
-    // don't include this key, but candle's from_gguf requires it.
-    // Formula: rope_dim = embedding_length / attention.head_count (= head_dim)
-    if !content.metadata.contains_key("llama.rope.dimension_count") {
-        let embd = content
-            .metadata
-            .get("llama.embedding_length")
-            .and_then(|v| v.to_u32().ok());
-        let heads = content
-            .metadata
-            .get("llama.attention.head_count")
-            .and_then(|v| v.to_u32().ok());
-        if let Some(dim) = embd.zip(heads).and_then(|(e, h)| e.checked_div(h)) {
-            content.metadata.insert(
-                "llama.rope.dimension_count".to_string(),
-                gguf_file::Value::U32(dim),
-            );
+/// Reduce model output to a 1-D `[vocab]` logits vector.
+///
+/// candle's quantized models already return only the last position, shaped
+/// `[batch=1, vocab]`; a `[1, seq, vocab]` tensor is also accepted and its last
+/// position used.
+fn last_token_logits(logits: &Tensor) -> candle_core::Result<Tensor> {
+    let logits = logits.squeeze(0)?;
+    match logits.rank() {
+        1 => Ok(logits),
+        2 => {
+            let seq_len = logits.dim(0)?;
+            logits.get(seq_len - 1)
         }
+        rank => candle_core::bail!("unexpected logits rank {}", rank),
     }
 }
 
@@ -83,15 +108,23 @@ fn engine_lock() -> &'static Mutex<Option<SlmEngine>> {
 }
 
 /// In-process small language model engine backed by candle.
-#[derive(Debug)]
 struct SlmEngine {
-    model_path: String,
+    model: ModelWeights,
     tokenizer: Tokenizer,
     device: Device,
+    eos_ids: Vec<u32>,
+}
+
+/// Output of one generation call.
+#[derive(Debug, Clone)]
+pub struct Generation {
+    pub text: String,
+    pub prompt_tokens: u32,
+    pub output_tokens: u32,
 }
 
 impl SlmEngine {
-    /// Create a new engine, validating the model and tokenizer files.
+    /// Load the tokenizer and GGUF weights.
     fn new(model_path: &str, tokenizer_path: &str) -> Result<Self, String> {
         if !Path::new(model_path).exists() {
             return Err(format!("Model file not found: {}", model_path));
@@ -103,41 +136,46 @@ impl SlmEngine {
         let device = Device::Cpu;
         let tokenizer = Tokenizer::from_file(tokenizer_path)
             .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
+        let model = ModelWeights::load(model_path, &device)?;
 
-        // Validate GGUF header (fast — reads metadata only, not weights).
-        let mut file = std::fs::File::open(model_path)
-            .map_err(|e| format!("Failed to open model: {}", e))?;
-        let _header = gguf_file::Content::read(&mut file)
-            .map_err(|e| format!("Invalid GGUF file: {}", e))?;
+        // EOS tokens for ChatML (Qwen) and Llama-style vocabularies.
+        let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]
+            .iter()
+            .filter_map(|s| tokenizer.token_to_id(s))
+            .collect();
 
         Ok(Self {
-            model_path: model_path.to_string(),
+            model,
             tokenizer,
             device,
+            eos_ids,
         })
     }
 
     /// Generate text from a pre-formatted prompt.
     ///
-    /// Loads a fresh `ModelWeights` each call so the KV cache starts clean.
-    fn generate(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
-        // Load weights fresh for clean KV cache.
-        let mut file = std::fs::File::open(&self.model_path)
-            .map_err(|e| format!("Failed to open model: {}", e))?;
-        let mut content = gguf_file::Content::read(&mut file)
-            .map_err(|e| format!("Failed to read GGUF: {}", e))?;
-        // Remap non-llama architectures (Qwen2, etc.) so quantized_llama can load them.
-        remap_gguf_metadata_for_llama(&mut content);
-        let mut model = qlm::ModelWeights::from_gguf(content, &mut file, &self.device)
-            .map_err(|e| format!("Failed to load weights: {}", e))?;
+    /// Stops at EOS, `max_tokens`, the time limit, or when `cancel` is set.
+    fn generate(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Generation, String> {
+        let deadline = Instant::now() + GENERATION_TIME_LIMIT;
+        let should_stop =
+            || Instant::now() >= deadline || cancel.is_some_and(|c| c.load(Ordering::SeqCst));
 
         let encoded = self
             .tokenizer
             .encode(prompt, true)
             .map_err(|e| format!("Tokenization error: {}", e))?;
         let prompt_tokens = encoded.get_ids().to_vec();
-        if prompt_tokens.is_empty() {
-            return Ok(String::new());
+        if prompt_tokens.is_empty() || max_tokens == 0 {
+            return Ok(Generation {
+                text: String::new(),
+                prompt_tokens: prompt_tokens.len() as u32,
+                output_tokens: 0,
+            });
         }
 
         let sampling = Sampling::TopKThenTopP {
@@ -146,71 +184,44 @@ impl SlmEngine {
             temperature: 0.1,
         };
         let mut logits_processor = LogitsProcessor::from_sampling(42, sampling);
-
-        // ── Prefill: process all prompt tokens at once ──────────────
-        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
-            .and_then(|t| t.unsqueeze(0))
-            .map_err(|e| format!("Tensor error: {}", e))?;
-        let logits = model
-            .forward(&input, 0)
-            .map_err(|e| format!("Forward error: {}", e))?;
-        let logits = logits
-            .squeeze(0)
-            .map_err(|e| format!("Squeeze error: {}", e))?;
-
-        // Sample from last position's logits.
-        let seq_len = logits.dim(0).map_err(|e| format!("Dim error: {}", e))?;
-        let last_logits = logits
-            .get(seq_len - 1)
-            .map_err(|e| format!("Get error: {}", e))?;
-        let mut next_token = logits_processor
-            .sample(&last_logits)
-            .map_err(|e| format!("Sample error: {}", e))?;
-
-        // EOS tokens for Qwen2.5 ChatML
-        let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>", "</s>"]
-            .iter()
-            .filter_map(|s| self.tokenizer.token_to_id(s))
-            .collect();
-
         let mut output_tokens: Vec<u32> = Vec::with_capacity(max_tokens as usize);
-        if !eos_ids.contains(&next_token) {
-            output_tokens.push(next_token);
-        }
 
-        // ── Autoregressive decode ───────────────────────────────────
-        for i in 1..max_tokens {
-            if eos_ids.contains(&next_token) {
-                break;
-            }
+        // Prefill: the whole prompt at positions 0..n. Position 0 also resets the KV cache.
+        let mut input = prompt_tokens.clone();
+        let mut pos = 0usize;
 
-            let pos = prompt_tokens.len() + i as usize;
-            let input = Tensor::new(&[next_token], &self.device)
+        while output_tokens.len() < max_tokens as usize {
+            let input_tensor = Tensor::new(input.as_slice(), &self.device)
                 .and_then(|t| t.unsqueeze(0))
                 .map_err(|e| format!("Tensor error: {}", e))?;
-            let logits = model
-                .forward(&input, pos)
+            let logits = self
+                .model
+                .forward(&input_tensor, pos)
+                .and_then(|l| last_token_logits(&l))
                 .map_err(|e| format!("Forward error: {}", e))?;
-            let logits = logits
-                .squeeze(0)
-                .map_err(|e| format!("Squeeze error: {}", e))?;
+            pos += input.len();
 
-            // Single-token input → may return [1, vocab] or [vocab].
-            let token_logits = if logits.dims().len() > 1 {
+            let logits = if output_tokens.is_empty() {
                 logits
-                    .get(0)
-                    .map_err(|e| format!("Get error: {}", e))?
             } else {
-                logits
+                let start = output_tokens.len().saturating_sub(REPEAT_LAST_N);
+                apply_repeat_penalty(&logits, REPEAT_PENALTY, &output_tokens[start..])
+                    .map_err(|e| format!("Repeat penalty error: {}", e))?
             };
 
-            next_token = logits_processor
-                .sample(&token_logits)
+            let next_token = logits_processor
+                .sample(&logits)
                 .map_err(|e| format!("Sample error: {}", e))?;
-
-            if !eos_ids.contains(&next_token) {
-                output_tokens.push(next_token);
+            if self.eos_ids.contains(&next_token) {
+                break;
             }
+            output_tokens.push(next_token);
+
+            if should_stop() {
+                break;
+            }
+            // Decode: feed the sampled token at the next position.
+            input = vec![next_token];
         }
 
         let text = self
@@ -218,23 +229,30 @@ impl SlmEngine {
             .decode(&output_tokens, true)
             .map_err(|e| format!("Decode error: {}", e))?;
 
-        Ok(text.trim().to_string())
+        Ok(Generation {
+            text: text.trim().to_string(),
+            prompt_tokens: prompt_tokens.len() as u32,
+            output_tokens: output_tokens.len() as u32,
+        })
     }
 }
 
-// ── Public API (drop-in replacement for sidecar functions) ────────────
+// ── Public API ────────────────────────────────────────────────────────
 
 /// Load the SLM engine with a GGUF model and HuggingFace tokenizer.
-/// No-op if already loaded.
+/// No-op if already loaded. Weights are read outside the lock so a slow
+/// load does not block `is_engine_loaded()` checks.
 pub fn load_engine(model_path: &str, tokenizer_path: &str) -> Result<(), String> {
-    let mut guard = engine_lock()
-        .lock()
-        .map_err(|e| format!("Engine lock error: {}", e))?;
-    if guard.is_some() {
+    if is_engine_loaded() {
         return Ok(());
     }
     let engine = SlmEngine::new(model_path, tokenizer_path)?;
-    *guard = Some(engine);
+    let mut guard = engine_lock()
+        .lock()
+        .map_err(|e| format!("Engine lock error: {}", e))?;
+    if guard.is_none() {
+        *guard = Some(engine);
+    }
     Ok(())
 }
 
@@ -253,22 +271,34 @@ pub fn is_engine_loaded() -> bool {
         .unwrap_or(false)
 }
 
-/// Run a ChatML-formatted completion against the loaded model.
-/// Blocking — must be called from `spawn_blocking` or a sync context.
-pub fn chat_inference(system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
-    let guard = engine_lock()
-        .lock()
-        .map_err(|e| format!("Engine lock: {}", e))?;
-    let engine = guard.as_ref().ok_or("SLM engine not loaded")?;
-
-    // ChatML prompt format (Qwen2.5 Instruct)
-    let prompt = format!(
+/// Format a ChatML prompt (Qwen2.5 Instruct template).
+fn chatml_prompt(system: &str, user: &str) -> String {
+    format!(
         "<|im_start|>system\n{system}<|im_end|>\n\
          <|im_start|>user\n{user}<|im_end|>\n\
          <|im_start|>assistant\n"
-    );
+    )
+}
 
-    engine.generate(&prompt, max_tokens)
+/// Run a ChatML-formatted completion against the loaded model.
+/// Blocking — must be called from `spawn_blocking` or a sync context.
+/// Calls are serialised: the model has a single KV cache.
+pub fn generate(
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    cancel: Option<&AtomicBool>,
+) -> Result<Generation, String> {
+    let mut guard = engine_lock()
+        .lock()
+        .map_err(|e| format!("Engine lock: {}", e))?;
+    let engine = guard.as_mut().ok_or("SLM engine not loaded")?;
+    engine.generate(&chatml_prompt(system, user), max_tokens, cancel)
+}
+
+/// Convenience wrapper returning only the generated text.
+pub fn chat_inference(system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
+    generate(system, user, max_tokens, None).map(|g| g.text)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -286,7 +316,7 @@ mod tests {
     fn load_missing_model_returns_error() {
         let result = SlmEngine::new("/nonexistent/model.gguf", "/nonexistent/tokenizer.json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not found"));
+        assert!(result.err().unwrap().contains("not found"));
     }
 
     #[test]
@@ -297,76 +327,164 @@ mod tests {
     }
 
     #[test]
-    fn remap_gguf_metadata_copies_qwen2_keys_to_llama() {
+    fn chatml_prompt_wraps_roles() {
+        let p = chatml_prompt("sys", "hi");
+        assert_eq!(
+            p,
+            "<|im_start|>system\nsys<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn last_token_logits_accepts_model_output_shape() {
+        // Quantized models return [batch=1, vocab] for the last position.
+        let logits = Tensor::new(&[[0.1f32, 0.9, 0.0, 0.2]], &Device::Cpu).unwrap();
+        let out = last_token_logits(&logits).unwrap();
+        assert_eq!(out.dims(), &[4]);
+
+        // The sampler needs that 1-D vector; greedy sampling picks the max.
+        let mut lp = LogitsProcessor::from_sampling(0, Sampling::ArgMax);
+        assert_eq!(lp.sample(&out).unwrap(), 1);
+    }
+
+    #[test]
+    fn last_token_logits_uses_last_position_of_full_sequence() {
+        let logits = Tensor::new(
+            &[[[1.0f32, 0.0, 0.0], [0.0, 0.0, 1.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let out = last_token_logits(&logits).unwrap();
+        assert_eq!(out.to_vec1::<f32>().unwrap(), vec![0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn indexing_vocab_dim_yields_unsampleable_scalar() {
+        // Regression: the previous implementation squeezed [1, vocab] to [vocab]
+        // and then took `.get(len - 1)`, i.e. one scalar logit — sampling that fails,
+        // so every SLM call errored.
+        let logits = Tensor::new(&[[0.1f32, 0.9, 0.0, 0.2]], &Device::Cpu)
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
+        let scalar = logits.get(logits.dim(0).unwrap() - 1).unwrap();
+        let mut lp = LogitsProcessor::from_sampling(0, Sampling::ArgMax);
+        assert!(lp.sample(&scalar).is_err());
+    }
+
+    /// Write a tiny random-weight Qwen2 GGUF plus a word-level tokenizer.
+    fn write_tiny_qwen2(dir: &Path) -> (String, String) {
+        use candle_core::quantized::{GgmlDType, QTensor};
+        use std::collections::HashMap;
+        use tokenizers::models::wordlevel::WordLevel;
+        use tokenizers::pre_tokenizers::whitespace::Whitespace;
+
+        const VOCAB: usize = 32;
+        const EMBD: usize = 8;
+        const KV: usize = 4; // 1 kv head × head_dim 4
+        const FFN: usize = 16;
+
+        let q = |shape: &[usize]| {
+            let t = Tensor::randn(0f32, 0.5, shape, &Device::Cpu).unwrap();
+            QTensor::quantize(&t, GgmlDType::F32).unwrap()
+        };
+        let tensors = [
+            ("token_embd.weight", q(&[VOCAB, EMBD])),
+            ("output_norm.weight", q(&[EMBD])),
+            ("output.weight", q(&[VOCAB, EMBD])),
+            ("blk.0.attn_q.weight", q(&[EMBD, EMBD])),
+            ("blk.0.attn_k.weight", q(&[KV, EMBD])),
+            ("blk.0.attn_v.weight", q(&[KV, EMBD])),
+            ("blk.0.attn_q.bias", q(&[EMBD])),
+            ("blk.0.attn_k.bias", q(&[KV])),
+            ("blk.0.attn_v.bias", q(&[KV])),
+            ("blk.0.attn_output.weight", q(&[EMBD, EMBD])),
+            ("blk.0.ffn_gate.weight", q(&[FFN, EMBD])),
+            ("blk.0.ffn_up.weight", q(&[FFN, EMBD])),
+            ("blk.0.ffn_down.weight", q(&[EMBD, FFN])),
+            ("blk.0.attn_norm.weight", q(&[EMBD])),
+            ("blk.0.ffn_norm.weight", q(&[EMBD])),
+        ];
+        let metadata = [
+            ("general.architecture", gguf_file::Value::String("qwen2".to_string())),
+            ("qwen2.attention.head_count", gguf_file::Value::U32(2)),
+            ("qwen2.attention.head_count_kv", gguf_file::Value::U32(1)),
+            ("qwen2.embedding_length", gguf_file::Value::U32(EMBD as u32)),
+            ("qwen2.context_length", gguf_file::Value::U32(256)),
+            ("qwen2.block_count", gguf_file::Value::U32(1)),
+            ("qwen2.attention.layer_norm_rms_epsilon", gguf_file::Value::F32(1e-6)),
+        ];
+
+        let model_path = dir.join("tiny.gguf");
+        let mut file = std::fs::File::create(&model_path).unwrap();
+        let md: Vec<(&str, &gguf_file::Value)> = metadata.iter().map(|(k, v)| (*k, v)).collect();
+        let ts: Vec<(&str, &QTensor)> = tensors.iter().map(|(k, v)| (*k, v)).collect();
+        gguf_file::write(&mut file, &md, &ts).unwrap();
+
+        let mut words: Vec<String> = vec!["[UNK]".to_string(), "<|im_end|>".to_string()];
+        words.extend((words.len()..VOCAB).map(|i| format!("w{i}")));
+        let vocab: HashMap<String, u32> =
+            words.into_iter().enumerate().map(|(i, w)| (w, i as u32)).collect();
+        let wordlevel = WordLevel::builder()
+            .vocab(vocab.into_iter().collect())
+            .unk_token("[UNK]".to_string())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(wordlevel);
+        tokenizer.with_pre_tokenizer(Some(Whitespace {}));
+        let tokenizer_path = dir.join("tokenizer.json");
+        tokenizer.save(&tokenizer_path, false).unwrap();
+
+        (
+            model_path.to_string_lossy().into_owned(),
+            tokenizer_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[test]
+    fn generates_end_to_end_with_qwen2_gguf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, tokenizer) = write_tiny_qwen2(tmp.path());
+        let mut engine = SlmEngine::new(&model, &tokenizer).unwrap();
+        assert!(matches!(engine.model, ModelWeights::Qwen2(_)));
+
+        let prompt = chatml_prompt("w5 w6", "w7 w8 w9");
+        let first = engine.generate(&prompt, 12, None).unwrap();
+        assert!(first.prompt_tokens > 0);
+        assert!(first.output_tokens <= 12);
+
+        // Same prompt again: KV cache must reset, so output is identical.
+        let second = engine.generate(&prompt, 12, None).unwrap();
+        assert_eq!(first.text, second.text);
+        assert_eq!(first.output_tokens, second.output_tokens);
+    }
+
+    #[test]
+    fn generation_stops_immediately_when_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, tokenizer) = write_tiny_qwen2(tmp.path());
+        let mut engine = SlmEngine::new(&model, &tokenizer).unwrap();
+        let cancel = AtomicBool::new(true);
+        let out = engine
+            .generate(&chatml_prompt("w5", "w7"), 50, Some(&cancel))
+            .unwrap();
+        assert!(out.output_tokens <= 1);
+    }
+
+    #[test]
+    fn gguf_architecture_reads_metadata() {
         use std::collections::HashMap;
         let mut metadata = HashMap::new();
         metadata.insert(
             "general.architecture".to_string(),
             gguf_file::Value::String("qwen2".to_string()),
         );
-        metadata.insert(
-            "qwen2.attention.head_count".to_string(),
-            gguf_file::Value::U32(16),
-        );
-        metadata.insert(
-            "qwen2.block_count".to_string(),
-            gguf_file::Value::U32(24),
-        );
-        metadata.insert(
-            "qwen2.embedding_length".to_string(),
-            gguf_file::Value::U32(896),
-        );
-
-        let mut content = gguf_file::Content {
+        let content = gguf_file::Content {
             magic: gguf_file::VersionedMagic::GgufV3,
             metadata,
             tensor_infos: HashMap::new(),
             tensor_data_offset: 0,
         };
-
-        remap_gguf_metadata_for_llama(&mut content);
-
-        // Original keys still present
-        assert!(content.metadata.contains_key("qwen2.attention.head_count"));
-        // Llama keys added
-        assert!(content.metadata.contains_key("llama.attention.head_count"));
-        assert!(content.metadata.contains_key("llama.block_count"));
-        // Values match
-        assert_eq!(
-            content.metadata["llama.attention.head_count"].to_u32().unwrap(),
-            16
-        );
-        // rope.dimension_count synthesized: 896 / 16 = 56
-        assert!(content.metadata.contains_key("llama.rope.dimension_count"));
-        assert_eq!(
-            content.metadata["llama.rope.dimension_count"].to_u32().unwrap(),
-            56 // 896 / 16
-        );
-    }
-
-    #[test]
-    fn remap_gguf_metadata_noop_for_llama_arch() {
-        use std::collections::HashMap;
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "general.architecture".to_string(),
-            gguf_file::Value::String("llama".to_string()),
-        );
-        metadata.insert(
-            "llama.attention.head_count".to_string(),
-            gguf_file::Value::U32(32),
-        );
-
-        let mut content = gguf_file::Content {
-            magic: gguf_file::VersionedMagic::GgufV3,
-            metadata,
-            tensor_infos: HashMap::new(),
-            tensor_data_offset: 0,
-        };
-
-        remap_gguf_metadata_for_llama(&mut content);
-
-        // No extra keys added
-        assert_eq!(content.metadata.len(), 2);
+        assert_eq!(gguf_architecture(&content), "qwen2");
     }
 }
