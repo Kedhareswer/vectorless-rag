@@ -52,6 +52,8 @@ interface SettingsState {
   updateProvider: (id: string, updates: Partial<ProviderConfig>) => void;
   removeProvider: (id: string) => void;
   setActiveProvider: (id: string | null) => void;
+  /** Make a configured provider the active one and persist the change. */
+  activateProvider: (id: string) => Promise<void>;
   setMaxSteps: (steps: number) => void;
   loadProviders: () => Promise<void>;
   saveProviderToBackend: (provider: ProviderConfig) => Promise<void>;
@@ -119,6 +121,19 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  activateProvider: async (id: string) => {
+    const changed = get()
+      .providers.filter((p) => p.isActive !== (p.id === id))
+      .map((p) => ({ ...p, isActive: p.id === id }));
+    if (changed.length === 0) return;
+    get().setActiveProvider(id);
+    try {
+      for (const p of changed) await saveProviderIPC(toTauri(p));
+    } catch (err) {
+      console.warn('Failed to switch provider:', err);
+      set({ error: String(err) });
+    }
+  },
   saveProviderToBackend: async (provider: ProviderConfig) => {
     set({ error: null });
     try {

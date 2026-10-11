@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, Fragment } from 'react';
-import { Send, Square, FileText, Compass, AlertCircle, Server, Upload, FolderOpen, Settings } from 'lucide-react';
+import { Send, Square, FileText, AlertCircle, Upload, Plus, LoaderCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -9,6 +9,9 @@ import { useDocumentsStore } from '../../stores/documents';
 import { useSettingsStore } from '../../stores/settings';
 import { chatWithAgent, abortQuery, type ChatEvent } from '../../lib/tauri';
 import { ProcessSummary } from './ProcessSummary';
+import { ChatEmptyState } from './ChatEmptyState';
+import { ModelPicker } from './ModelPicker';
+import { useAddDocument } from '../../hooks/useAddDocument';
 import { MessageActions } from './MessageActions';
 import { DictationButton } from './DictationButton';
 import styles from './ChatPanel.module.css';
@@ -37,10 +40,10 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
     updateStepStatus,
     setIsExploring,
     clearSteps,
-    addDocToActiveConversation,
   } = useChatStore();
 
-  const { documents, ingestDocumentFromPath } = useDocumentsStore();
+  const { documents } = useDocumentsStore();
+  const { pickAndAdd, addFromPath, isIngesting } = useAddDocument();
   const { providers, activeProviderId } = useSettingsStore();
 
   const activeProvider = providers.find((p) => p.id === activeProviderId);
@@ -107,31 +110,26 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
     }
   }, [input]);
 
-  const handleSend = async () => {
-    const trimmed = input.trim();
-    if (!trimmed) return;
+  /** Send the composer text, or `text` when given (starter questions). */
+  const handleSend = async (text?: string) => {
+    const trimmed = (text ?? input).trim();
+    if (!trimmed || isExploring) return;
 
     const docIds = [...conversationDocIds];
 
-    if (docIds.length === 0) {
-      setSendError('No documents attached to this chat. Add a document first.');
+    if (!activeProviderId || !activeProvider) {
+      setSendError('Connect a model provider in Settings first.');
       return;
     }
 
-    if (!activeProviderId || !activeProvider) {
-      setSendError('Please configure an LLM provider in Settings.');
+    if (docIds.length === 0) {
+      setSendError('Add a document to this chat first — answers come from your documents.');
       return;
     }
 
     setSendError(null);
 
-    let convId = activeConversationId;
-    if (!convId) {
-      convId = createConversation(trimmed.slice(0, 40));
-      for (const docId of docIds) {
-        await addDocToActiveConversation(docId);
-      }
-    }
+    const convId = activeConversationId ?? createConversation(trimmed.slice(0, 40));
 
     addMessage({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -176,16 +174,9 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      const file = files[0];
-      const filePath = (file as any).path || file.name;
-      if (filePath) {
-        const summary = await ingestDocumentFromPath(filePath);
-        if (summary) {
-          await addDocToActiveConversation(summary.id);
-        }
-      }
+    for (const file of Array.from(e.dataTransfer.files)) {
+      const filePath = (file as unknown as { path?: string }).path ?? file.name;
+      if (filePath) await addFromPath(filePath);
     }
   };
 
@@ -215,35 +206,15 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
       <div className={styles.messages}>
         <div className={styles.messagesInner}>
           {!hasContent ? (
-            <div className={styles.empty}>
-              <div className={styles.emptyIconWrap}>
-                <Compass size={32} />
-              </div>
-              <h3 className={styles.emptyTitle}>
-                Start exploring
-              </h3>
-              <p className={styles.emptySubtitle}>
-                {!activeConversationId
-                  ? 'Create a new chat from the top bar, then add documents to explore'
-                  : noDocs
-                    ? 'Add documents and ask questions \u2014 I\'ll navigate the structure to find answers'
-                    : 'Add documents and ask questions \u2014 I\'ll navigate the structure to find answers'}
-              </p>
-              <div className={styles.emptyActions}>
-                {noProvider && onOpenSettings && (
-                  <button type="button" className={styles.emptyAction} onClick={onOpenSettings}>
-                    <Settings size={14} />
-                    <span>Configure Provider</span>
-                  </button>
-                )}
-                {noDocs && activeConversationId && onOpenDocs && (
-                  <button type="button" className={styles.emptyAction} onClick={onOpenDocs}>
-                    <FolderOpen size={14} />
-                    <span>Add Documents</span>
-                  </button>
-                )}
-              </div>
-            </div>
+            <ChatEmptyState
+              hasProvider={!noProvider}
+              docNames={convDocNames as string[]}
+              isIngesting={isIngesting}
+              onOpenSettings={() => onOpenSettings?.()}
+              onAddDocument={() => void pickAndAdd()}
+              onFocusInput={() => textareaRef.current?.focus()}
+              onAsk={(q) => void handleSend(q)}
+            />
           ) : (
             <>
               {(() => {
@@ -314,8 +285,8 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
       <div className={styles.inputBarWrap}>
         <div className={styles.inputBar}>
           <div className={styles.inputMeta}>
-            {convDocNames.length > 0 && (
-              <button type="button" className={styles.docChip} onClick={onOpenDocs}>
+            {convDocNames.length > 0 ? (
+              <button type="button" className={styles.docChip} onClick={onOpenDocs} title="Documents in this chat">
                 <FileText size={12} />
                 <span>
                   {convDocNames.length === 1
@@ -323,13 +294,18 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
                     : `${convDocNames.length} documents`}
                 </span>
               </button>
-            )}
-            {activeProvider && (
-              <div className={styles.providerChip}>
-                <Server size={10} />
-                <span>{activeProvider.name}/{activeProvider.model}</span>
-              </div>
-            )}
+            ) : null}
+            <button
+              type="button"
+              className={styles.docChip}
+              onClick={() => void pickAndAdd()}
+              disabled={isIngesting}
+              title="Add a document to this chat"
+            >
+              {isIngesting ? <LoaderCircle size={12} className={styles.spin} /> : <Plus size={12} />}
+              <span>{isIngesting ? 'Adding…' : convDocNames.length > 0 ? 'Add' : 'Add document'}</span>
+            </button>
+            <ModelPicker onOpenSettings={() => onOpenSettings?.()} />
           </div>
 
           <div className={styles.inputRow}>
@@ -339,26 +315,24 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
               className={styles.textarea}
               placeholder={
                 noProvider
-                  ? 'Configure a provider in Settings first...'
-                  : !activeConversationId
-                    ? 'Create a new chat to get started...'
-                    : noDocs
-                      ? 'Add a document to this chat first...'
-                      : 'Ask about your documents...'
+                  ? 'Connect a model provider in Settings to start…'
+                  : noDocs
+                    ? 'Add a document, then ask anything about it…'
+                    : 'Ask about your documents…'
               }
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               rows={1}
               aria-label="Message input"
-              disabled={isExploring || !activeConversationId}
+              disabled={isExploring}
             />
             <DictationButton
               onTranscript={(text) => {
                 setInput((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
                 textareaRef.current?.focus();
               }}
-              disabled={isExploring || !activeConversationId}
+              disabled={isExploring}
             />
             {isExploring ? (
               <button
@@ -373,7 +347,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
               <button
                 type="button"
                 className={clsx(styles.sendBtn, input.trim() && styles.sendBtnActive)}
-                onClick={handleSend}
+                onClick={() => void handleSend()}
                 disabled={!input.trim()}
                 title="Send message (Enter)"
               >

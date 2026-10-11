@@ -55,72 +55,6 @@
 
 /* Empty state */
 
-.empty {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 60px 24px;
-  text-align: center;
-}
-
-.emptyIconWrap {
-  width: 56px;
-  height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 14px;
-  background-color: var(--accent-soft);
-  color: var(--accent);
-  margin-bottom: 8px;
-}
-
-.emptyTitle {
-  font-size: var(--text-lg);
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-}
-
-.emptySubtitle {
-  font-size: var(--text-sm);
-  color: var(--text-tertiary);
-  max-width: 340px;
-  line-height: 1.5;
-  margin: 0;
-}
-
-.emptyActions {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.emptyAction {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all var(--transition-fast);
-}
-
-.emptyAction:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
 /* User messages — right-aligned bubble */
 
 .userRow {
@@ -366,15 +300,17 @@
   background-color: var(--accent-soft);
 }
 
-.providerChip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 10px;
-  color: var(--text-tertiary);
-  margin-left: auto;
+.docChip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Input row */

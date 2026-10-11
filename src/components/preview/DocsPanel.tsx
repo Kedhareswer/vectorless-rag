@@ -4,7 +4,8 @@ import clsx from 'clsx';
 import { useDocumentsStore } from '../../stores/documents';
 import { useChatStore } from '../../stores/chat';
 import { useLocalModelStore } from '../../stores/localModel';
-import { openFileDialog, getCrossDocRelations, reenrichDocument } from '../../lib/tauri';
+import { getCrossDocRelations, reenrichDocument } from '../../lib/tauri';
+import { useAddDocument } from '../../hooks/useAddDocument';
 import { TreeView } from './TreeView';
 import styles from './DocsPanel.module.css';
 
@@ -18,14 +19,13 @@ export function DocsPanel() {
     isIngesting,
     error: docError,
     setActiveDocument,
-    ingestDocumentFromPath,
   } = useDocumentsStore();
+  const { pickAndAdd, addFromPath } = useAddDocument();
 
   const {
     activeConversationId,
     conversationDocIds,
     relationsVersion,
-    addDocToActiveConversation,
     removeDocFromActiveConversation,
   } = useChatStore();
 
@@ -49,19 +49,7 @@ export function DocsPanel() {
     .map((id) => documents.find((d) => d.id === id))
     .filter((d): d is NonNullable<typeof d> => d != null);
 
-  const handleAddDocument = async () => {
-    try {
-      const filePath = await openFileDialog();
-      if (filePath) {
-        const summary = await ingestDocumentFromPath(filePath);
-        if (summary && activeConversationId) {
-          await addDocToActiveConversation(summary.id);
-        }
-      }
-    } catch (err) {
-      console.warn('Failed to add document:', err);
-    }
-  };
+  const handleAddDocument = () => void pickAndAdd();
 
   const handleRemoveDoc = async (e: React.MouseEvent, docId: string) => {
     e.stopPropagation();
@@ -96,21 +84,20 @@ export function DocsPanel() {
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const filePath = (file as unknown as { path?: string }).path ?? file.name;
-      if (filePath) {
-        try {
-          const summary = await ingestDocumentFromPath(filePath);
-          if (summary && activeConversationId) {
-            await addDocToActiveConversation(summary.id);
-          }
-        } catch (err) {
-          console.warn('Failed to ingest dropped file:', err);
-        }
-      }
+      if (filePath) await addFromPath(filePath);
     }
-  }, [ingestDocumentFromPath, activeConversationId, addDocToActiveConversation]);
+  }, [addFromPath]);
 
   if (!activeConversationId) {
-    return <p className={styles.emptyText}>Select or create a chat to manage its documents</p>;
+    return (
+      <div>
+        <p className={styles.emptyText}>No chat is open. Adding a document starts a new chat.</p>
+        <button type="button" className={styles.addBtn} onClick={handleAddDocument} disabled={isIngesting}>
+          <Plus size={14} />
+          <span>Add Document</span>
+        </button>
+      </div>
+    );
   }
 
   return (
