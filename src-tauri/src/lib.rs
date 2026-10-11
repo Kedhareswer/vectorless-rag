@@ -96,6 +96,7 @@ pub fn run() {
             commands::get_conversation_messages,
             commands::save_message,
             commands::delete_conversation,
+            commands::rename_conversation,
             commands::add_doc_to_conversation,
             commands::remove_doc_from_conversation,
             commands::get_conversation_doc_ids,

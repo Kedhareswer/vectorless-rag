@@ -56,8 +56,10 @@
 /* List */
 .list {
   flex: 1;
-  overflow-y: auto;
+  margin: 0;
   padding: var(--space-1) 0;
+  overflow-y: auto;
+  list-style: none;
 }
 
 /* Conversation item */
@@ -122,56 +124,95 @@
   white-space: nowrap;
 }
 
-/* Delete button — visible on hover */
-.deleteBtn {
+/* Row actions — visible on hover / highlight */
+.itemActions {
   display: none;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.item:hover .itemActions,
+.itemHighlight .itemActions,
+.itemActions:focus-within {
+  display: flex;
+}
+
+.actionBtn {
+  display: flex;
   align-items: center;
   justify-content: center;
   width: 22px;
   height: 22px;
   border: none;
+  border-radius: var(--radius-sm);
   background: none;
   color: var(--text-tertiary);
   cursor: pointer;
-  border-radius: var(--radius-sm);
-  flex-shrink: 0;
-  transition: all var(--transition-fast);
-  margin-top: 1px;
 }
 
-.item:hover .deleteBtn {
-  display: flex;
+.actionBtn:hover {
+  color: var(--text-primary);
+  background-color: var(--bg-surface);
 }
 
-.deleteBtn:hover {
+.dangerBtn,
+.dangerBtn:hover {
   color: var(--error);
-  background-color: rgba(248, 113, 113, 0.1);
+}
+
+.itemIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+}
+
+.itemHighlight {
+  background-color: var(--bg-hover);
+}
+
+.renameInput {
+  width: 100%;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  outline: none;
 }
 
 /* New chat button */
 .newChatBtn {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  margin: var(--space-2) var(--space-3);
-  padding: var(--space-3);
-  border: 1px dashed var(--border);
+  gap: var(--space-3);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: none;
+  border-top: 1px solid var(--border);
   background: none;
-  color: var(--text-secondary);
+  color: var(--text-primary);
   cursor: pointer;
-  border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   font-family: var(--font-ui);
   font-weight: 500;
-  transition: all var(--transition-fast);
   flex-shrink: 0;
 }
 
 .newChatBtn:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-  background-color: var(--accent-soft);
+  background-color: var(--bg-hover);
+}
+
+.kbd {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
 }
 
 /* Empty state */

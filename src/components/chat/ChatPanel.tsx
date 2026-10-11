@@ -334,6 +334,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
 
           <div className={styles.inputRow}>
             <textarea
+              id="chat-input"
               ref={textareaRef}
               className={styles.textarea}
               placeholder={

@@ -1,107 +1,138 @@
 .topBar {
   display: flex;
   align-items: center;
+  gap: var(--space-1);
   height: var(--topbar-height);
-  padding: 0 var(--space-4);
+  padding: 0 var(--space-3);
   background-color: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  gap: var(--space-3);
   z-index: 10;
   -webkit-app-region: drag;
 }
 
-.topBar > * {
+.topBar > *,
+.actions > * {
   -webkit-app-region: no-drag;
 }
 
-/* Menu / conversation switcher trigger */
-.menuButton {
+/* Chat title — doubles as the chat switcher trigger */
+.titleButton {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(420px, 50vw);
+  height: 30px;
+  padding: 0 8px 0 10px;
   border: none;
+  border-radius: var(--radius-md);
   background: none;
-  color: var(--text-secondary);
   cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
-  flex-shrink: 0;
+  transition: background-color var(--transition-fast);
 }
 
-.menuButton:hover {
-  color: var(--text-primary);
+.titleButton:hover,
+.titleButtonOpen {
   background-color: var(--bg-hover);
 }
 
-.menuButton:active {
-  transform: scale(0.95);
-}
-
-/* Chat title */
 .chatTitle {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-primary);
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
 }
 
 .chatTitleEmpty {
-  color: var(--text-tertiary);
   font-weight: 500;
+  color: var(--text-secondary);
 }
 
-/* Right-side icon buttons */
+.titleChevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.spacer {
+  flex: 1;
+}
+
 .actions {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: 2px;
   flex-shrink: 0;
 }
 
-.iconBtn {
+.iconBtn,
+.labelBtn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  gap: 6px;
+  height: 30px;
   border: none;
+  border-radius: var(--radius-md);
   background: none;
   color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
   cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: all var(--transition-fast);
-  position: relative;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
 }
 
-.iconBtn:hover {
+.iconBtn {
+  width: 30px;
+}
+
+.labelBtn {
+  padding: 0 10px;
+}
+
+.iconBtn:hover,
+.labelBtn:hover {
   color: var(--text-primary);
   background-color: var(--bg-hover);
 }
 
-.iconBtn:active {
-  transform: scale(0.95);
-}
-
-.iconBtnActive {
-  color: var(--accent);
+.btnActive,
+.btnActive:hover {
+  color: var(--accent-text);
   background-color: var(--accent-soft);
 }
 
-.iconBtnActive:hover {
-  background-color: var(--accent-muted);
+.countBadge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background-color: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
 }
 
-/* Divider between icon groups */
+.btnActive .countBadge {
+  background-color: var(--accent-muted);
+  color: var(--accent-text);
+}
+
 .divider {
   width: 1px;
   height: 16px;
+  margin: 0 4px;
   background-color: var(--border);
-  flex-shrink: 0;
+}
+
+/* Narrow windows: icons only */
+@media (max-width: 960px) {
+  .btnText {
+    display: none;
+  }
 }

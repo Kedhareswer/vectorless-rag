@@ -170,6 +170,8 @@ export const getConversationMessages = (convId: string) => invoke<MessageRecord[
 export const saveMessageIPC = (id: string, convId: string, role: string, content: string) =>
   invoke<void>('save_message', { id, convId, role, content });
 export const deleteConversationIPC = (convId: string) => invoke<void>('delete_conversation', { convId });
+export const renameConversationIPC = (convId: string, title: string) =>
+  invoke<void>('rename_conversation', { convId, title });
 
 // Conversation-Document associations (documents scoped per chat)
 export const addDocToConversation = (convId: string, docId: string) =>

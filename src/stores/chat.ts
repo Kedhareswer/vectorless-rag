@@ -5,6 +5,7 @@ import {
   saveConversationIPC,
   saveMessageIPC,
   deleteConversationIPC,
+  renameConversationIPC,
   getTraces,
   getSteps,
   addDocToConversation,
@@ -72,6 +73,11 @@ interface ChatState {
   relationsVersion: number;
 
   createConversation: (title: string, docId?: string) => string;
+  /** Open a fresh chat, reusing the current one if it is still empty. */
+  startNewChat: () => string;
+  /** Re-open the last used chat (or the most recent one) after launch. */
+  resumeLastConversation: () => void;
+  renameConversation: (id: string, title: string) => Promise<void>;
   setActiveConversation: (id: string | null) => void;
   addMessage: (message: ChatMessage) => void;
   addExplorationStep: (step: ExplorationStep) => void;
@@ -88,6 +94,37 @@ interface ChatState {
   removeDocFromActiveConversation: (docId: string) => Promise<void>;
   /** Load doc IDs for a conversation from backend */
   loadConversationDocIds: (convId: string) => Promise<void>;
+}
+
+/** Title given to chats before their first question names them. */
+export const NEW_CHAT_TITLE = 'New Chat';
+
+const LAST_CONVERSATION_KEY = 'tgg-last-conversation';
+
+/** Chat title derived from the first question: one line, cut at a word boundary. */
+export function titleFromMessage(text: string, max = 48): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  if (line.length <= max) return line || NEW_CHAT_TITLE;
+  const cut = line.slice(0, max);
+  const lastSpace = cut.lastIndexOf(' ');
+  return `${(lastSpace > max / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
+function rememberConversation(id: string | null) {
+  try {
+    if (id) localStorage.setItem(LAST_CONVERSATION_KEY, id);
+    else localStorage.removeItem(LAST_CONVERSATION_KEY);
+  } catch {
+    // Storage unavailable; resuming falls back to the most recent chat.
+  }
+}
+
+function lastConversation(): string | null {
+  try {
+    return localStorage.getItem(LAST_CONVERSATION_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function generateId(): string {
@@ -128,6 +165,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionSteps: [],
       conversationDocIds: [],
     }));
+    rememberConversation(id);
     // Persist to backend (fire-and-forget)
     saveConversationIPC(id, title, docId ?? null).catch((err) =>
       console.warn('Failed to save conversation:', err)
@@ -135,7 +173,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
     return id;
   },
 
+  startNewChat: () => {
+    const { activeConversationId, messages, conversationDocIds, conversations, createConversation } = get();
+    const active = conversations.find((c) => c.id === activeConversationId);
+    if (active && messages.length === 0 && conversationDocIds.length === 0) {
+      return active.id;
+    }
+    return createConversation(NEW_CHAT_TITLE);
+  },
+
+  resumeLastConversation: () => {
+    const { activeConversationId, conversations, setActiveConversation } = get();
+    if (activeConversationId || conversations.length === 0) return;
+    const remembered = lastConversation();
+    const target = conversations.find((c) => c.id === remembered) ?? conversations[0];
+    setActiveConversation(target.id);
+  },
+
+  renameConversation: async (id: string, title: string) => {
+    const clean = title.replace(/\s+/g, ' ').trim();
+    if (!clean) return;
+    set((state) => ({
+      conversations: state.conversations.map((c) => (c.id === id ? { ...c, title: clean } : c)),
+    }));
+    try {
+      await renameConversationIPC(id, clean);
+    } catch (err) {
+      console.warn('Failed to rename conversation:', err);
+    }
+  },
+
   setActiveConversation: (id: string | null) => {
+    rememberConversation(id);
     set({
       activeConversationId: id,
       messages: [],
@@ -159,11 +228,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   addMessage: (message: ChatMessage) => {
+    const isFirstQuestion =
+      message.role === 'user' && !get().messages.some((m) => m.role === 'user');
     set((state) => ({
       messages: [...state.messages, message],
     }));
     // Persist to backend
     const convId = get().activeConversationId;
+    // Name untitled chats after their first question.
+    const conv = get().conversations.find((c) => c.id === convId);
+    if (convId && isFirstQuestion && conv?.title === NEW_CHAT_TITLE) {
+      void get().renameConversation(convId, titleFromMessage(message.content));
+    }
     if (convId) {
       saveMessageIPC(message.id, convId, message.role, message.content).catch((err) =>
         console.warn('Failed to save message:', err)
@@ -347,8 +423,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   addDocToActiveConversation: async (docId: string) => {
-    const convId = get().activeConversationId;
-    if (!convId) return;
+    // Adding a document is a natural way to start: open a chat if none is active.
+    const convId = get().activeConversationId ?? get().createConversation(NEW_CHAT_TITLE);
 
     try {
       await addDocToConversation(convId, docId);

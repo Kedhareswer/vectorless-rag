@@ -322,6 +322,16 @@ pub fn delete_conversation(db: State<Database>, conv_id: String) -> Result<(), S
     db.delete_conversation(&conv_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn rename_conversation(db: State<Database>, conv_id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Title cannot be empty".to_string());
+    }
+    db.update_conversation_title(&conv_id, crate::util::safe_truncate(title, 200))
+        .map_err(|e| e.to_string())
+}
+
 // --- Conversation-Document association commands ---
 
 #[tauri::command]

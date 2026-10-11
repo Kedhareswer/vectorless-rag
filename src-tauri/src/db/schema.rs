@@ -941,6 +941,35 @@ mod tests {
     }
 
     #[test]
+    fn test_update_conversation_title_keeps_messages() {
+        let (db, _dir) = test_db();
+        db.save_conversation(&ConversationRecord {
+            id: "conv-1".to_string(),
+            title: "New Chat".to_string(),
+            doc_id: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .unwrap();
+        db.save_message(&MessageRecord {
+            id: "m1".to_string(),
+            conv_id: "conv-1".to_string(),
+            role: "user".to_string(),
+            content: "hi".to_string(),
+            created_at: "2026-01-01T00:00:01Z".to_string(),
+        })
+        .unwrap();
+
+        db.update_conversation_title("conv-1", "Renewal terms").unwrap();
+
+        let convs = db.list_conversations().unwrap();
+        assert_eq!(convs[0].title, "Renewal terms");
+        assert_eq!(convs[0].created_at, "2026-01-01T00:00:00Z");
+        assert_ne!(convs[0].updated_at, "2026-01-01T00:00:00Z");
+        assert_eq!(db.get_conversation_messages("conv-1").unwrap().len(), 1);
+    }
+
+    #[test]
     fn test_save_message_and_get_conversation_messages() {
         let (db, _dir) = test_db();
         let conv = ConversationRecord {
