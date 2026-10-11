@@ -6,15 +6,25 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default; only the release job can write (tags + GitHub release).
 permissions:
-  contents: write
+  contents: read
+
+# A newer push to the same PR/branch supersedes in-flight runs. Pushes to main
+# are never cancelled so every release build completes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: 24
 
 jobs:
   rust:
     name: Rust (test + clippy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system dependencies
         run: |
@@ -31,7 +41,7 @@ jobs:
 
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Tests
         working-directory: src-tauri
@@ -41,11 +51,12 @@ jobs:
     name: Frontend (typecheck + test + build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
 
       - name: Install dependencies
         run: npm ci --loglevel=warn
@@ -59,14 +70,19 @@ jobs:
       - name: Build
         run: npx vite build
 
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
   release:
     name: Release
     needs: [rust, frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -91,9 +107,10 @@ jobs:
           sed -i "0,/^version = \"[^\"]*\"/s//version = \"$VERSION\"/" src-tauri/Cargo.toml
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
