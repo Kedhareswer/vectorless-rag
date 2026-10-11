@@ -807,8 +807,10 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
+    // No trim_text: entity refs arrive as separate events, so trimming each Text
+    // event would drop the spaces around them ("Tom &amp; Jerry" -> "Tom&Jerry").
+    // Paragraph and cell text is trimmed once it is complete.
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
 
     let mut buf = Vec::new();
     let mut current_text = String::new();
@@ -824,29 +826,29 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
     while let Ok(event) = reader.read_event_into(&mut buf) {
         match event {
             Event::Start(ref e) => match e.local_name().as_ref() {
-                b"p" if !in_table => {
+                "p" if !in_table => {
                     in_para = true;
                     current_text.clear();
                     para_style.clear();
                 }
-                b"tbl" => {
+                "tbl" => {
                     in_table = true;
                     let node = TreeNode::new(NodeType::Table, "Table".to_string());
                     let id = node.id.clone();
                     let _ = tree.add_node(&current_parent, node);
                     table_id = Some(id);
                 }
-                b"tr" => { row_cells.clear(); }
-                b"tc" => { cell_text.clear(); }
+                "tr" => { row_cells.clear(); }
+                "tc" => { cell_text.clear(); }
                 _ => {}
             },
 
             Event::Empty(ref e) => {
-                if e.local_name().as_ref() == b"pStyle" {
+                if e.local_name().as_ref() == "pStyle" {
                     for attr in e.attributes().flatten() {
-                        let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                        let key: &str = attr.key.as_ref();
                         if key == "w:val" || key == "val" {
-                            let val = std::str::from_utf8(&attr.value).unwrap_or("").to_string();
+                            let val = attr.value.to_string();
                             if val.to_lowercase().starts_with("heading") {
                                 para_style = val;
                             }
@@ -856,7 +858,7 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
             }
 
             Event::End(ref e) => match e.local_name().as_ref() {
-                b"p" if !in_table => {
+                "p" if !in_table => {
                     let trimmed = current_text.trim().to_string();
                     if !trimmed.is_empty() {
                         if para_style.to_lowercase().starts_with("heading") {
@@ -888,11 +890,11 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
                     para_style.clear();
                     current_text.clear();
                 }
-                b"tc" => {
+                "tc" => {
                     row_cells.push(cell_text.trim().to_string());
                     cell_text.clear();
                 }
-                b"tr" => {
+                "tr" => {
                     if !row_cells.is_empty() {
                         if let Some(ref tid) = table_id.clone() {
                             let row_node = TreeNode::new(NodeType::TableRow, row_cells.join(" | "));
@@ -901,16 +903,33 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
                     }
                     row_cells.clear();
                 }
-                b"tbl" => { in_table = false; table_id = None; }
+                "tbl" => { in_table = false; table_id = None; }
                 _ => {}
             },
 
             Event::Text(ref e) => {
-                let text = e.unescape().unwrap_or_default();
+                let text = e.xml10_content();
                 if in_table {
                     cell_text.push_str(&text);
                 } else if in_para {
                     current_text.push_str(&text);
+                }
+            }
+
+            // quick-xml reports `&amp;` / `&#8217;` etc. as separate events, not inside Text.
+            Event::GeneralRef(ref e) => {
+                let resolved = match e.resolve_char_ref() {
+                    Ok(Some(c)) => Some(c.to_string()),
+                    _ => quick_xml::escape::unescape(&format!("&{};", &**e))
+                        .ok()
+                        .map(|s| s.into_owned()),
+                };
+                if let Some(text) = resolved {
+                    if in_table {
+                        cell_text.push_str(&text);
+                    } else if in_para {
+                        current_text.push_str(&text);
+                    }
                 }
             }
 
@@ -1156,6 +1175,29 @@ pub fn get_parser_for_file(path: &str) -> Box<dyn DocumentParser> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- DOCX XML tests ---
+
+    #[test]
+    fn docx_xml_resolves_entities_and_keeps_spacing() {
+        let xml = r#"<w:document><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>R&amp;D Plan</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Tom &amp; Jerry&#8217;s &lt;show&gt;</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>A &amp; B</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>"#;
+        let mut tree = DocumentTree::new("t.docx".to_string(), DocType::Word);
+        let root_id = tree.root_id.clone();
+        parse_docx_xml(xml, &mut tree, &root_id);
+
+        let contents: Vec<(NodeType, String)> = tree
+            .nodes
+            .values()
+            .map(|n| (n.node_type.clone(), n.content.clone()))
+            .collect();
+        assert!(contents.contains(&(NodeType::Section, "R&D Plan".to_string())));
+        assert!(contents.contains(&(NodeType::Paragraph, "Tom & Jerry\u{2019}s <show>".to_string())));
+        assert!(contents.contains(&(NodeType::TableRow, "A & B | C".to_string())));
+    }
 
     // --- detect_heading tests ---
 
