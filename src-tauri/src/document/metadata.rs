@@ -315,7 +315,8 @@ fn extract_topics(content: &str) -> Vec<String> {
     }
 
     let mut sorted: Vec<(String, usize)> = freq.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    // Highest frequency first; ties broken alphabetically so output is deterministic.
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     sorted.into_iter().take(5).map(|(w, _)| w).collect()
 }

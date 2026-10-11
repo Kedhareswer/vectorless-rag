@@ -65,13 +65,11 @@ fn remap_gguf_metadata_for_llama(content: &mut gguf_file::Content) {
             .metadata
             .get("llama.attention.head_count")
             .and_then(|v| v.to_u32().ok());
-        if let (Some(e), Some(h)) = (embd, heads) {
-            if h > 0 {
-                content.metadata.insert(
-                    "llama.rope.dimension_count".to_string(),
-                    gguf_file::Value::U32(e / h),
-                );
-            }
+        if let Some(dim) = embd.zip(heads).and_then(|(e, h)| e.checked_div(h)) {
+            content.metadata.insert(
+                "llama.rope.dimension_count".to_string(),
+                gguf_file::Value::U32(dim),
+            );
         }
     }
 }

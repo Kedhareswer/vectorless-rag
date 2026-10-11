@@ -588,14 +588,12 @@ impl Database {
                     // Retrieve from OS keychain
                     config.api_key = Some(keychain_get(&config.id).unwrap_or_default());
                 }
-                Some(key) if !key.is_empty() => {
-                    // Legacy plaintext key — migrate to keychain
-                    if keychain_set(&config.id, key).is_ok() {
-                        let _ = conn.execute(
-                            "UPDATE providers SET api_key_encrypted = ?1 WHERE id = ?2",
-                            params![KEYCHAIN_PLACEHOLDER, config.id],
-                        );
-                    }
+                // Legacy plaintext key — migrate to keychain
+                Some(key) if !key.is_empty() && keychain_set(&config.id, key).is_ok() => {
+                    let _ = conn.execute(
+                        "UPDATE providers SET api_key_encrypted = ?1 WHERE id = ?2",
+                        params![KEYCHAIN_PLACEHOLDER, config.id],
+                    );
                 }
                 _ => {}
             }

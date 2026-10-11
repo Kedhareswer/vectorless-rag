@@ -289,17 +289,17 @@ pub async fn run_agent_chat(
         let _ = channel.send(ChatEvent::StepStart {
             step_number: rewrite_step,
             tool: "query_rewrite".to_string(),
-            input_summary: format!("Rephrasing: \"{}\"", &message),
+            input_summary: format!("Rephrasing: \"{}\"", message),
         });
         let _ = channel.send(ChatEvent::StepStart {
             step_number: hyde_step,
             tool: "hyde".to_string(),
-            input_summary: format!("Generating hypothetical answer for: \"{}\"", &message),
+            input_summary: format!("Generating hypothetical answer for: \"{}\"", message),
         });
         let _ = channel.send(ChatEvent::StepStart {
             step_number: stepback_step,
             tool: "stepback".to_string(),
-            input_summary: format!("Broadening: \"{}\"", &message),
+            input_summary: format!("Broadening: \"{}\"", message),
         });
 
         // Run all three enrichment calls IN PARALLEL — this is the single biggest

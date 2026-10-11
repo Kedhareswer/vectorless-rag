@@ -349,10 +349,11 @@ fn slm_classify_heading(line: &str, context: &str) -> Option<u32> {
         Some(1)
     } else if lower.contains("heading:2") || lower.contains("heading: 2") {
         Some(2)
-    } else if lower.contains("heading:3") || lower.contains("heading: 3") {
-        Some(3)
-    } else if lower.starts_with("heading") {
-        Some(3) // generic heading without level → subsection
+    } else if lower.contains("heading:3")
+        || lower.contains("heading: 3")
+        || lower.starts_with("heading")
+    {
+        Some(3) // level 3, or generic heading without level → subsection
     } else {
         None
     }
@@ -527,7 +528,7 @@ impl PdfParser {
     /// Not called automatically — available via explicit "Re-parse with LiteParse" action.
     pub fn parse_with_liteparse(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
         let json = super::liteparse::parse_pdf(file_path)
-            .map_err(|e| ParseError::Other(e))?;
+            .map_err(ParseError::Other)?;
         let blocks = super::liteparse::extract_text_blocks(&json);
         if blocks.is_empty() {
             return Err(ParseError::Other("LiteParse returned no content".to_string()));

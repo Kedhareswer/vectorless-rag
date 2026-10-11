@@ -556,17 +556,13 @@ fn find_table_header_with_map(tree: &DocumentTree, node_id: &str, parent_map: &H
 fn find_parent_section_id_with_map(tree: &DocumentTree, node_id: &str, parent_map: &HashMap<String, String>) -> Option<String> {
     let mut current = node_id.to_string();
     loop {
-        match parent_map.get(&current) {
-            Some(parent_id) => {
-                if let Some(parent) = tree.get_node(parent_id) {
-                    if matches!(parent.node_type, NodeType::Section | NodeType::Root) {
-                        return Some(parent_id.clone());
-                    }
-                }
-                current = parent_id.clone();
+        let parent_id = parent_map.get(&current)?;
+        if let Some(parent) = tree.get_node(parent_id) {
+            if matches!(parent.node_type, NodeType::Section | NodeType::Root) {
+                return Some(parent_id.clone());
             }
-            None => return None,
         }
+        current = parent_id.clone();
     }
 }
 
