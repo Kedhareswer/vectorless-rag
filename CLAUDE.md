@@ -179,37 +179,41 @@ Intent → fetch strategy:
 
 ### Layout: TopBar + slide-over panels
 ```
-┌─────────────────────────────────────────────────────┐
-│ TopBar: ConversationSwitcher | icon buttons (docs,  │
-│         trace, settings)                            │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│              Main Chat Area                         │
-│           + ThinkingBlocks (steps visible)           │
-│                                                     │
-│   ┌────────────────────┐                            │
-│   │ SlidePanel overlay │  (DocsPanel, TracePanel,   │
-│   │   (from right)     │   SettingsModal)           │
-│   └────────────────────┘                            │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ [Chat title ▾] [✎ new]          [Documents n] [Trace] | [⚙]  │
+├──────────────────────────────────────────────────────────────┤
+│   Empty chat: setup checklist → starter questions            │
+│   Question → ProcessSummary (steps, folds when done) → answer│
+│   ┌ composer ───────────────────────────────────────────┐    │
+│   │ [doc chip] [+ Add]                 [model picker ▾] │    │
+│   │ Ask about your documents…                [mic] [➤]  │    │
+│   └─────────────────────────────────────────────────────┘    │
+│                          SlidePanel (Docs / Trace) from right │
+└──────────────────────────────────────────────────────────────┘
 ```
-- ConversationSwitcher: dropdown in TopBar (replaces sidebar chats tab)
-- DocsPanel: slide-over panel showing per-conversation documents
-- TracePanel: slide-over panel with trace/cost details
-- SettingsModal: provider configuration
-- ThinkingBlock shows each pipeline step with icon, label, output preview, token badge, latency badge
+- Chat title is the ConversationSwitcher trigger (search, ↑/↓/Enter, rename, delete with confirm)
+- Launch resumes the last chat (`resumeLastConversation`); `startNewChat` reuses an empty chat; untitled chats are named after the first question
+- Add documents ONLY via `hooks/useAddDocument` (ingest → attach, creating a chat if none is open)
+- Composer ModelPicker switches the active provider (`activateProvider` persists both rows)
+- SettingsModal: two-pane, sections from `SETTINGS_SECTIONS` (Providers, Local AI, Appearance, Data); model is free text with suggestions
+- Answers have a Copy action (`MessageActions`)
 
-### ThinkingBlock Step Labels
+### Pipeline step display
+Step labels/icons live in ONE registry: `src/lib/pipelineSteps.ts` (`PIPELINE_STEPS`, `getStepMeta`). Used by ThinkingBlock (chat) and TraceView. A new backend step = one entry there.
+
 | tool key | label | icon |
 |---|---|---|
-| `query_rewrite` | Rewriting query | PenLine |
+| `query_rewrite` | Rewrote query | PenLine |
 | `hyde` | Hypothetical answer (HyDE) | Sparkles |
-| `stepback` | Broadening question (StepBack) | ArrowUpRight |
-| `tree_overview` | Reading structure | FileText |
-| `search` | Searching content | Search |
-| `expand` | Reading section | BookOpen |
-| `scan_lists` | Scanning lists & tables | List |
-| `llm_call` | Generating answer | Cpu |
+| `stepback` | Broadened question (StepBack) | ArrowUpRight |
+| `tree_overview` | Read structure | FileText |
+| `search` | Searched content | Search |
+| `expand` | Read section | BookOpen |
+| `scan_lists` | Scanned lists & tables | List |
+| `llm_call` | Generated answer | Cpu |
+
+### Keyboard shortcuts (`src/lib/shortcuts.ts` → `useShortcuts`)
+`mod` = ⌘ on macOS, Ctrl elsewhere: mod+N new chat · mod+K switch chat · mod+D documents · mod+J trace · mod+, settings · `/` focus input. Tooltips get hints from the same registry (`withShortcut`).
 
 ### Color Tokens
 ```
@@ -273,6 +277,10 @@ src/
     dictation.ts            — dictation model status, recording/transcribing phase
   lib/tauri.ts              — typed invoke wrappers for all Tauri commands
   lib/audio.ts              — mic recording + downsampling to 16 kHz
+  lib/pipelineSteps.ts      — step label/icon registry
+  lib/shortcuts.ts          — keyboard shortcut registry
+  lib/format.ts             — latency/cost/count formatting
+  hooks/useShortcuts.ts, hooks/useAddDocument.ts
   components/
     common/TopBar.tsx         — top navigation bar with ConversationSwitcher + icon buttons
     common/ConversationSwitcher.tsx — conversation dropdown (replaces sidebar chats tab)
@@ -280,12 +288,17 @@ src/
     common/IconButton.tsx     — shared icon button component
     common/ModelDownloadDialog.tsx
     chat/ChatPanel.tsx        — message input, handleSend, event handler, ThinkingBlock list
-    chat/ThinkingBlock.tsx    — renders one pipeline step
+    chat/ProcessSummary.tsx   — collapsible group of pipeline steps under a question
+    chat/ThinkingBlock.tsx    — renders one pipeline step (labels from lib/pipelineSteps.ts)
+    chat/ChatEmptyState.tsx   — setup checklist / starter questions
+    chat/ModelPicker.tsx      — composer provider switcher
+    chat/MessageActions.tsx   — copy (and future) answer actions
     chat/DictationButton.tsx  — mic button + first-use model download prompt
     preview/DocsPanel.tsx     — per-conversation document list (slide-over)
     preview/TracePanel.tsx    — trace/cost panel (slide-over)
     preview/TreeView.tsx, CanvasView.tsx, TraceView.tsx, RelationsView.tsx
-    settings/SettingsModal.tsx — provider configuration modal
+    settings/SettingsModal.tsx — tabbed settings (Providers, Local AI, Appearance, Data)
+    settings/LocalAISettings.tsx — enrichment + dictation model management
 ```
 
 ## DB Schema (V3 — current)
@@ -342,7 +355,7 @@ providers (id, name, api_key_encrypted, base_url, model, is_active)
 1. Add async function in `agent/query.rs` following `rewrite_query()` pattern (returns `EnrichmentResult`)
 2. Export in `agent/mod.rs`
 3. Add step block in `run_agent_chat()` with: StepStart → LLM call → StepComplete → `trace_steps.push`
-4. Add step type → label/icon mapping in `ThinkingBlock.tsx`
+4. Add the tool key → label/icon entry in `src/lib/pipelineSteps.ts`
 5. Increment `step_counter` before each StepStart
 
 ### Security
