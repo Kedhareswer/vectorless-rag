@@ -1,66 +1,62 @@
 import { useState } from 'react';
-import { Wrench, Clock, Zap, ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronRight, LoaderCircle } from 'lucide-react';
 import clsx from 'clsx';
 import type { ExplorationStep } from '../../stores/chat';
+import { getStepMeta } from '../../lib/pipelineSteps';
+import { formatCount, formatLatency } from '../../lib/format';
 import styles from './ThinkingBlock.module.css';
 
 interface ThinkingBlockProps {
   step: ExplorationStep;
 }
 
+/** One pipeline step: icon, label, result preview; click to see input/output. */
 export function ThinkingBlock({ step }: ThinkingBlockProps) {
   const [expanded, setExpanded] = useState(false);
-
-  if (step.status === 'running') {
-    return (
-      <div className={styles.running}>
-        <div className={styles.pulseBar} />
-        <div className={styles.runningContent}>
-          <Wrench size={14} className={styles.toolIcon} />
-          <span className={styles.toolName}>{step.tool}</span>
-          <span className={styles.runningLabel}>Running...</span>
-        </div>
-      </div>
-    );
-  }
+  const meta = getStepMeta(step.tool);
+  const Icon = meta.icon;
+  const running = step.status === 'running';
+  const hasDetails = !running && (step.inputSummary || step.outputSummary);
 
   return (
-    <div className={clsx(styles.complete, expanded && styles.expanded)}>
+    <div className={clsx(styles.step, running && styles.running)}>
       <button
-        className={styles.completeHeader}
-        onClick={() => setExpanded(!expanded)}
         type="button"
+        className={styles.header}
+        onClick={() => hasDetails && setExpanded((v) => !v)}
+        aria-expanded={hasDetails ? expanded : undefined}
+        disabled={!hasDetails}
       >
-        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <Wrench size={14} className={styles.toolIcon} />
-        <span className={styles.toolName}>{step.tool}</span>
-        <span className={styles.summary}>
-          {step.outputSummary.length > 60
-            ? `${step.outputSummary.slice(0, 60)}...`
-            : step.outputSummary}
+        <span className={styles.iconWrap}>
+          {running ? <LoaderCircle size={13} className={styles.spin} /> : <Icon size={13} />}
         </span>
-        <div className={styles.badges}>
-          <span className={styles.tokenBadge}>
-            <Zap size={10} />
-            {step.tokensUsed}
-          </span>
-          <span className={styles.latencyBadge}>
-            <Clock size={10} />
-            {step.latencyMs}ms
-          </span>
-        </div>
+        <span className={styles.label}>{running ? `${meta.activeLabel}…` : meta.label}</span>
+        {!running && step.outputSummary && (
+          <span className={styles.summary}>{step.outputSummary}</span>
+        )}
+        <span className={styles.badges}>
+          {step.tokensUsed > 0 && <span className={styles.badge}>{formatCount(step.tokensUsed)} tok</span>}
+          {step.latencyMs > 0 && <span className={styles.badge}>{formatLatency(step.latencyMs)}</span>}
+        </span>
+        {hasDetails && (
+          <ChevronRight size={13} className={clsx(styles.chevron, expanded && styles.chevronOpen)} />
+        )}
       </button>
 
       {expanded && (
         <div className={styles.details}>
-          <div className={styles.detailRow}>
-            <span className={styles.detailLabel}>Input</span>
-            <pre className={styles.detailValue}>{step.inputSummary}</pre>
-          </div>
-          <div className={styles.detailRow}>
-            <span className={styles.detailLabel}>Output</span>
-            <pre className={styles.detailValue}>{step.outputSummary}</pre>
-          </div>
+          {step.inputSummary && (
+            <div className={styles.detailRow}>
+              <span className={styles.detailLabel}>Input</span>
+              <p className={styles.detailValue}>{step.inputSummary}</p>
+            </div>
+          )}
+          {step.outputSummary && (
+            <div className={styles.detailRow}>
+              <span className={styles.detailLabel}>Result</span>
+              <p className={styles.detailValue}>{step.outputSummary}</p>
+            </div>
+          )}
         </div>
       )}
     </div>

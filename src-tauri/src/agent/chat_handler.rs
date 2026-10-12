@@ -9,13 +9,13 @@ use crate::document::metadata::discover_cross_doc_relations;
 use crate::document::tree::DocumentTree;
 use crate::llm::provider::{LLMProvider, Message, ProviderConfig};
 use crate::llm::{
-    AgentRouterProvider, AnthropicProvider, GoogleProvider, GroqProvider,
+    AgentRouterProvider, AnthropicProvider, GoogleProvider, GroqProvider, LocalProvider,
     OllamaProvider, OpenAICompatProvider, OpenRouterProvider, RetryProvider,
 };
 
 use super::events::ChatEvent;
 use super::deterministic::{fetch_content, format_for_prompt};
-use super::query::{preprocess_query, rewrite_query, generate_hyde, stepback_query, extract_terms_from_text, QueryIntent};
+use super::query::{preprocess_query, rewrite_query, generate_hyde, stepback_query, extract_terms_from_text, EnrichmentResult, QueryIntent};
 use crate::llm::local;
 
 /// Rough token estimate: ~4 chars per token plus overhead for role/formatting.
@@ -26,8 +26,19 @@ fn estimate_tokens(msg: &Message) -> usize {
 /// Context budget for conversation history (tokens).
 const HISTORY_TOKEN_BUDGET: usize = 8000;
 
+/// Provider name of the offline, in-process answer model.
+pub const LOCAL_PROVIDER: &str = "local";
+/// Smaller budgets for the local model: it reads the prompt on the CPU, so
+/// every token of context costs real time before the answer starts.
+const LOCAL_CONTENT_BUDGET: usize = 12_000;
+const LOCAL_HISTORY_TOKEN_BUDGET: usize = 2000;
+
 pub fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, String> {
     let provider_name = config.name.to_lowercase();
+    if provider_name == LOCAL_PROVIDER {
+        // In-process: nothing transient to retry.
+        return Ok(Box::new(LocalProvider::new(config)));
+    }
     let inner: Box<dyn LLMProvider> = match provider_name.as_str() {
         "ollama" => Box::new(OllamaProvider::new(config)),
         "groq" => Box::new(GroqProvider::new(config)),
@@ -49,6 +60,9 @@ pub fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, S
         )),
         "openai-compat" => Box::new(OpenAICompatProvider::new(
             config, "Custom", "",
+        )),
+        "lmstudio" => Box::new(OpenAICompatProvider::new_local(
+            config, "LM Studio", crate::llm::local_servers::LMSTUDIO_URL,
         )),
         _ => return Err(format!("Unknown provider: {}", config.name)),
     };
@@ -91,19 +105,30 @@ struct PipelineStep {
     latency_ms: i64,
 }
 
+/// Whole-query totals recorded on the trace.
+struct TraceTotals {
+    input_tokens: u32,
+    output_tokens: u32,
+    latency_ms: u64,
+    cost: f64,
+}
+
 fn save_trace_data(
     db: &Database,
     conv_id: &str,
     model_id: &str,
     pipeline_steps: &[PipelineStep],
-    total_input_tokens: u32,
-    total_output_tokens: u32,
-    total_latency_ms: u64,
+    totals: TraceTotals,
 ) -> Result<(), String> {
+    let TraceTotals {
+        input_tokens: total_input_tokens,
+        output_tokens: total_output_tokens,
+        latency_ms: total_latency_ms,
+        cost,
+    } = totals;
     let trace_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let total_tokens = total_input_tokens + total_output_tokens;
-    let cost = estimate_cost(model_id, total_input_tokens, total_output_tokens);
 
     let trace = TraceRecord {
         id: trace_id.clone(),
@@ -154,7 +179,7 @@ fn fetch_step_output_summary(
             } else {
                 let preview = content.trim().replace('\n', " ");
                 let preview = preview.split_whitespace().collect::<Vec<_>>().join(" ");
-                if preview.len() > 200 { format!("{}…", &preview[..200]) } else { preview }
+                if preview.len() > 200 { format!("{}…", crate::util::safe_truncate(&preview, 200)) } else { preview }
             }
         }
         "scan_lists" => format!("{} list/table sections found", step.node_ids.len()),
@@ -165,7 +190,7 @@ fn fetch_step_output_summary(
 /// Decide whether this query needs enrichment via local model.
 ///
 /// Enrichment is skipped when:
-/// - The local sidecar is not running (no local model downloaded/started).
+/// - No local SLM engine is loaded (no local model downloaded).
 /// - The query is already long and specific (≥8 words + ≥4 search terms).
 /// - The query has a clear intent with many terms (Comparison/ListExtract with ≥3 terms,
 ///   or Factual/Entity with ≥4 terms).
@@ -240,6 +265,11 @@ pub async fn run_agent_chat(
     doc_ids: Vec<String>,
 ) -> Result<(), String> {
     let model_id = provider_config.model.clone();
+    let is_local = provider_config.name.eq_ignore_ascii_case(LOCAL_PROVIDER);
+    // Running on this machine costs nothing per token.
+    let cost_of = |input: u32, output: u32| {
+        if is_local { 0.0 } else { estimate_cost(&model_id, input, output) }
+    };
     let provider = create_provider(provider_config)?;
     let overall_start = tokio::time::Instant::now();
 
@@ -267,97 +297,96 @@ pub async fn run_agent_chat(
     // All three are non-fatal: errors report as "Skipped" and pipeline continues.
 
     if should_enrich(&processed) {
-        // Helper: run a blocking enrichment call on a separate thread with timeout.
-        // Returns Ok(EnrichmentResult) or Err(reason) — never blocks the async runtime.
-        async fn run_enrichment<F>(f: F) -> Result<super::query::EnrichmentResult, String>
-        where
-            F: FnOnce() -> Result<super::query::EnrichmentResult, String> + Send + 'static,
-        {
-            let timeout_dur = tokio::time::Duration::from_secs(15);
-            match tokio::time::timeout(timeout_dur, tokio::task::spawn_blocking(f)).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => Err(format!("Enrichment task panicked: {}", e)),
-                Err(_) => Err("Enrichment timed out (>15s)".to_string()),
-            }
-        }
-
-        // Assign step numbers upfront and emit all StepStart events immediately
-        let rewrite_step = { step_counter += 1; step_counter };
-        let hyde_step = { step_counter += 1; step_counter };
-        let stepback_step = { step_counter += 1; step_counter };
-
-        let _ = channel.send(ChatEvent::StepStart {
-            step_number: rewrite_step,
-            tool: "query_rewrite".to_string(),
-            input_summary: format!("Rephrasing: \"{}\"", &message),
-        });
-        let _ = channel.send(ChatEvent::StepStart {
-            step_number: hyde_step,
-            tool: "hyde".to_string(),
-            input_summary: format!("Generating hypothetical answer for: \"{}\"", &message),
-        });
-        let _ = channel.send(ChatEvent::StepStart {
-            step_number: stepback_step,
-            tool: "stepback".to_string(),
-            input_summary: format!("Broadening: \"{}\"", &message),
-        });
-
-        // Run all three enrichment calls IN PARALLEL — this is the single biggest
-        // speed win. Sequential: ~9-15s. Parallel: ~3-5s (limited by slowest call).
-        let enrich_start = tokio::time::Instant::now();
-        let msg1 = message.clone();
-        let msg2 = message.clone();
-        let msg3 = message.clone();
-
-        let (rewrite_result, hyde_result, stepback_result) = tokio::join!(
-            run_enrichment(move || rewrite_query(&msg1)),
-            run_enrichment(move || generate_hyde(&msg2)),
-            run_enrichment(move || stepback_query(&msg3)),
-        );
-
-        let enrich_latency = enrich_start.elapsed().as_millis() as u64;
-
-        // Process results and emit StepComplete for each
-        let enrichment_results = [
-            ("query_rewrite", rewrite_step, rewrite_result),
-            ("hyde", hyde_step, hyde_result),
-            ("stepback", stepback_step, stepback_result),
+        let steps = [
+            ("query_rewrite", format!("Rephrasing: \"{}\"", message)),
+            ("hyde", format!("Generating hypothetical answer for: \"{}\"", message)),
+            ("stepback", format!("Broadening: \"{}\"", message)),
         ];
 
-        for (tool_name, step_num, result) in enrichment_results {
-            match result {
+        // Assign step numbers upfront and emit all StepStart events immediately
+        let mut step_numbers = [0u32; 3];
+        for (i, (tool, input_summary)) in steps.iter().enumerate() {
+            step_counter += 1;
+            step_numbers[i] = step_counter;
+            let _ = channel.send(ChatEvent::StepStart {
+                step_number: step_counter,
+                tool: tool.to_string(),
+                input_summary: input_summary.clone(),
+            });
+        }
+
+        // The local model has a single KV cache, so the three prompts run one after
+        // another on a blocking thread. Each generation is time-capped and stops on
+        // cancel; results are reported to the UI as soon as each one finishes.
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let query = message.clone();
+        let worker_cancel = cancel.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            type Enricher = fn(&str, &AtomicBool) -> Result<EnrichmentResult, String>;
+            let enrichers: [Enricher; 3] = [rewrite_query, generate_hyde, stepback_query];
+            for (i, enrich) in enrichers.into_iter().enumerate() {
+                let result = if worker_cancel.load(Ordering::SeqCst) {
+                    Err("Query cancelled".to_string())
+                } else {
+                    enrich(&query, &worker_cancel)
+                };
+                if result_tx.send((i, result)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut reported = [false; 3];
+        while let Some((i, result)) = result_rx.recv().await {
+            reported[i] = true;
+            let (output, tokens, latency_ms) = match result {
                 Ok(enrichment) => {
-                    let new_terms = extract_terms_from_text(&enrichment.text);
-                    for t in &new_terms {
-                        if !processed.search_terms.contains(t) {
-                            processed.search_terms.push(t.clone());
+                    for t in extract_terms_from_text(&enrichment.text) {
+                        if !processed.search_terms.contains(&t) {
+                            processed.search_terms.push(t);
                         }
                     }
-                    let _ = channel.send(ChatEvent::StepComplete {
-                        step_number: step_num,
-                        output_summary: enrichment.text.clone(),
-                        tokens_used: 0, latency_ms: enrich_latency, cost: 0.0, node_ids: vec![],
-                    });
-                    trace_steps.push(PipelineStep {
-                        tool: tool_name.to_string(),
-                        input: message.clone(),
-                        output: enrichment.text,
-                        tokens: 0, latency_ms: enrich_latency as i64,
-                    });
+                    let tokens = enrichment.input_tokens + enrichment.output_tokens;
+                    (enrichment.text, tokens, enrichment.latency_ms)
                 }
-                Err(e) => {
-                    let _ = channel.send(ChatEvent::StepComplete {
-                        step_number: step_num,
-                        output_summary: format!("Skipped: {}", e),
-                        tokens_used: 0, latency_ms: enrich_latency, cost: 0.0, node_ids: vec![],
-                    });
-                    trace_steps.push(PipelineStep {
-                        tool: tool_name.to_string(),
-                        input: message.clone(),
-                        output: format!("Skipped: {}", e),
-                        tokens: 0, latency_ms: enrich_latency as i64,
-                    });
-                }
+                Err(e) => (format!("Skipped: {}", e), 0, 0),
+            };
+            let _ = channel.send(ChatEvent::StepComplete {
+                step_number: step_numbers[i],
+                output_summary: output.clone(),
+                tokens_used: tokens,
+                latency_ms,
+                cost: 0.0, // local model — free
+                node_ids: vec![],
+            });
+            trace_steps.push(PipelineStep {
+                tool: steps[i].0.to_string(),
+                input: message.clone(),
+                output,
+                tokens: tokens as i64,
+                latency_ms: latency_ms as i64,
+            });
+        }
+
+        // If the worker died, close out the steps it never reported.
+        if let Err(e) = worker.await {
+            for i in (0..3).filter(|&i| !reported[i]) {
+                let output = format!("Skipped: enrichment worker failed ({})", e);
+                let _ = channel.send(ChatEvent::StepComplete {
+                    step_number: step_numbers[i],
+                    output_summary: output.clone(),
+                    tokens_used: 0,
+                    latency_ms: 0,
+                    cost: 0.0,
+                    node_ids: vec![],
+                });
+                trace_steps.push(PipelineStep {
+                    tool: steps[i].0.to_string(),
+                    input: message.clone(),
+                    output,
+                    tokens: 0,
+                    latency_ms: 0,
+                });
             }
         }
     }
@@ -369,7 +398,10 @@ pub async fn run_agent_chat(
     }
 
     // ── Phase 4: Deterministic content fetch (enriched terms) ───────
-    let fetched = fetch_content(&processed, &trees);
+    let mut fetched = fetch_content(&processed, &trees);
+    if is_local {
+        fetched.limit_to(LOCAL_CONTENT_BUDGET);
+    }
 
     // Send fetch steps as UI events (step numbers offset by preprocessing steps)
     for step in &fetched.fetch_steps {
@@ -477,12 +509,13 @@ Working with: {label}"#,
 
     // ── Phase 6: Load conversation history ──────────────────────────
     let mut history_messages: Vec<Message> = Vec::new();
-    if let Some(ref cid) = conv_id {
-        if let Ok(records) = db.get_conversation_messages(cid) {
+    if let Some(ref cid) = conv_id
+        && let Ok(records) = db.get_conversation_messages(cid) {
             let relevant: Vec<_> = records.iter()
                 .filter(|r| !(r.role == "user" && r.content == message))
                 .collect();
-            let mut budget_remaining = HISTORY_TOKEN_BUDGET;
+            let mut budget_remaining =
+                if is_local { LOCAL_HISTORY_TOKEN_BUDGET } else { HISTORY_TOKEN_BUDGET };
             for r in relevant.iter().rev() {
                 let msg = Message::text(&r.role, &r.content);
                 let tokens = estimate_tokens(&msg);
@@ -494,7 +527,6 @@ Working with: {label}"#,
             }
             history_messages.reverse();
         }
-    }
 
     let mut messages: Vec<Message> = vec![
         Message::text("system", &system_prompt),
@@ -560,7 +592,7 @@ Working with: {label}"#,
     let llm_tokens = llm_response.tokens_used.max(
         llm_response.input_tokens + llm_response.output_tokens,
     );
-    let llm_cost = estimate_cost(&model_id, llm_response.input_tokens, llm_response.output_tokens);
+    let llm_cost = cost_of(llm_response.input_tokens, llm_response.output_tokens);
 
     let _ = channel.send(ChatEvent::StepComplete {
         step_number: llm_step_number,
@@ -604,9 +636,12 @@ Working with: {label}"#,
         trace_conv_id,
         &model_id,
         &trace_steps,
-        total_input_tokens,
-        total_output_tokens,
-        total_latency_ms,
+        TraceTotals {
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            latency_ms: total_latency_ms,
+            cost: cost_of(total_input_tokens, total_output_tokens),
+        },
     )?;
 
     Ok(())

@@ -11,16 +11,16 @@ use std::sync::{Arc, Mutex};
 use db::Database;
 use commands::CancelFlags;
 use document::cache::TreeCache;
+use tauri::Manager;
 
 /// Resolve the database path inside the platform app data directory.
 /// Falls back to current directory if unavailable.
 fn resolve_db_path() -> String {
-    if let Some(data_dir) = app_data_dir() {
-        if std::fs::create_dir_all(&data_dir).is_ok() {
+    if let Some(data_dir) = app_data_dir()
+        && std::fs::create_dir_all(&data_dir).is_ok() {
             let path = data_dir.join("vectorless-rag.db");
             return path.to_string_lossy().to_string();
         }
-    }
     "vectorless-rag.db".to_string()
 }
 
@@ -54,12 +54,17 @@ pub fn run() {
     let db = Database::new(&db_path).expect("Failed to open database");
     db.initialize().expect("Failed to initialize database schema");
 
-    // Try to load the SLM engine at startup if a model is already downloaded.
-    // This runs once, so subsequent ingest/enrichment calls don't need to reload.
+    // Load the SLM engine at startup if a model is already downloaded, so later
+    // ingest/enrichment calls don't need to. Reading the weights takes a moment,
+    // so do it off the main thread; until it finishes, enrichment is skipped.
     if let Some(app_data) = app_data_dir() {
         let status = llm::local::check_local_model(&app_data, &db);
         if let (Some(model_path), true) = (status.model_path, status.tokenizer_ready) {
-            let _ = llm::local::load_engine(&model_path);
+            std::thread::spawn(move || {
+                if let Err(e) = llm::local::load_engine(&model_path) {
+                    eprintln!("Failed to load local model: {}", e);
+                }
+            });
         }
     }
 
@@ -91,6 +96,7 @@ pub fn run() {
             commands::get_conversation_messages,
             commands::save_message,
             commands::delete_conversation,
+            commands::rename_conversation,
             commands::add_doc_to_conversation,
             commands::remove_doc_from_conversation,
             commands::get_conversation_doc_ids,
@@ -106,10 +112,23 @@ pub fn run() {
             commands::check_local_model,
             commands::download_local_model,
             commands::delete_local_model,
+            commands::detect_local_models,
+            commands::get_dictation_options,
+            commands::check_dictation_model,
+            commands::download_dictation_model,
+            commands::delete_dictation_model,
+            commands::transcribe_audio,
             commands::describe_image,
             commands::reenrich_document,
             commands::clear_app_data,
         ])
+        .setup(|app| {
+            // Load the bundled PDFium library used by LiteParse.
+            if let Ok(dir) = app.path().resource_dir() {
+                document::liteparse::configure_library_dir(&dir.join("resources"));
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

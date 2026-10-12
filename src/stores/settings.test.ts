@@ -10,7 +10,6 @@ vi.mock('../lib/tauri', () => ({
 const initialState = () => ({
   providers: [],
   activeProviderId: null,
-  maxExplorationSteps: 10,
   isLoading: false,
   error: null,
 });
@@ -26,7 +25,6 @@ describe('SettingsStore', () => {
     const state = useSettingsStore.getState();
     expect(state.providers).toEqual([]);
     expect(state.activeProviderId).toBeNull();
-    expect(state.maxExplorationSteps).toBe(10);
     expect(state.isLoading).toBe(false);
     expect(state.error).toBeNull();
   });
@@ -158,18 +156,6 @@ describe('SettingsStore', () => {
     expect(state.providers[0].isActive).toBe(false);
   });
 
-  // ── setMaxSteps ────────────────────────────────────────────────
-
-  it('setMaxSteps updates maxExplorationSteps', () => {
-    useSettingsStore.getState().setMaxSteps(25);
-    expect(useSettingsStore.getState().maxExplorationSteps).toBe(25);
-  });
-
-  it('setMaxSteps can set to 1', () => {
-    useSettingsStore.getState().setMaxSteps(1);
-    expect(useSettingsStore.getState().maxExplorationSteps).toBe(1);
-  });
-
   // ── clearError ─────────────────────────────────────────────────
 
   it('clearError resets error to null', () => {
@@ -280,6 +266,50 @@ describe('SettingsStore', () => {
     await useSettingsStore.getState().deleteProviderFromBackend('p1');
 
     expect(useSettingsStore.getState().error).toBe('Error: Delete failed');
+  });
+
+  // ── selectServerModel ──────────────────────────────────────────
+
+  it('selectServerModel adds a keyless provider for a detected server and activates it', async () => {
+    useSettingsStore.setState({ providers: [makeProvider('p1', 'anthropic', true)], activeProviderId: 'p1', error: null });
+    await useSettingsStore.getState().selectServerModel('ollama', 'qwen3:8b', 'http://localhost:11434');
+    const s = useSettingsStore.getState();
+    const ollama = s.providers.find((p) => p.name === 'ollama');
+    expect(ollama).toMatchObject({ model: 'qwen3:8b', apiKey: '', baseUrl: 'http://localhost:11434', isActive: true });
+    expect(s.activeProviderId).toBe(ollama?.id);
+  });
+
+  it('selectServerModel reuses an existing provider and switches its model', async () => {
+    const existing = { ...makeProvider('o1', 'ollama', false), model: 'llama3.2', baseUrl: 'http://10.0.0.5:11434' };
+    useSettingsStore.setState({ providers: [existing], activeProviderId: null, error: null });
+    await useSettingsStore.getState().selectServerModel('ollama', 'phi4', 'http://localhost:11434');
+    const s = useSettingsStore.getState();
+    expect(s.providers).toHaveLength(1);
+    expect(s.providers[0]).toMatchObject({ id: 'o1', model: 'phi4', baseUrl: 'http://10.0.0.5:11434', isActive: true });
+  });
+
+  // ── enableLocalProvider ────────────────────────────────────────
+
+  it('enableLocalProvider adds and activates the offline provider once', async () => {
+    useSettingsStore.setState({
+      providers: [makeProvider('p1', 'anthropic', true)],
+      activeProviderId: 'p1',
+      error: null,
+    });
+    await useSettingsStore.getState().enableLocalProvider();
+    let s = useSettingsStore.getState();
+    const local = s.providers.find((p) => p.name === 'local');
+    expect(local).toBeDefined();
+    expect(local?.apiKey).toBe('');
+    expect(s.activeProviderId).toBe(local?.id);
+    expect(s.providers.find((p) => p.id === 'p1')?.isActive).toBe(false);
+
+    // A second call reuses it rather than adding another.
+    await useSettingsStore.getState().activateProvider('p1');
+    await useSettingsStore.getState().enableLocalProvider();
+    s = useSettingsStore.getState();
+    expect(s.providers.filter((p) => p.name === 'local')).toHaveLength(1);
+    expect(s.activeProviderId).toBe(local?.id);
   });
 });
 

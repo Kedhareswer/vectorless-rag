@@ -1,0 +1,72 @@
+.wrap {
+  margin: 4px 0 12px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background-color: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  background-color: var(--bg-hover);
+}
+
+.statusIcon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.title {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.meta {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--transition-normal);
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 4px 6px;
+  border-top: 1px solid var(--border-light);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}

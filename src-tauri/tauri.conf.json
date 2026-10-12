@@ -42,6 +42,6 @@
         "installerHooks": "installer-hooks.nsh"
       }
     },
-    "resources": []
+    "resources": ["resources/*"]
   }
 }

@@ -15,6 +15,8 @@ pub struct OpenAICompatProvider {
     pub client: reqwest::Client,
     /// Display name used in error messages.
     pub display_name: String,
+    /// Local servers (LM Studio) take no API key; cloud APIs require one.
+    pub requires_key: bool,
 }
 
 impl OpenAICompatProvider {
@@ -26,16 +28,43 @@ impl OpenAICompatProvider {
             config,
             client: reqwest::Client::new(),
             display_name: display_name.to_string(),
+            requires_key: true,
         }
     }
 
-    fn get_api_key(&self) -> Result<String, LLMError> {
-        self.config
+    /// A server on this machine (e.g. LM Studio): no API key, never via a proxy.
+    pub fn new_local(config: ProviderConfig, display_name: &str, default_base_url: &str) -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            requires_key: false,
+            ..Self::new(config, display_name, default_base_url)
+        }
+    }
+
+    /// The API key to send, if any. Errors only when this provider needs one.
+    fn get_api_key(&self) -> Result<Option<String>, LLMError> {
+        let key = self
+            .config
             .api_key
             .as_ref()
             .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .ok_or_else(|| LLMError::NoApiKey(self.display_name.clone()))
+            .filter(|k| !k.is_empty());
+        if key.is_none() && self.requires_key {
+            return Err(LLMError::NoApiKey(self.display_name.clone()));
+        }
+        Ok(key)
+    }
+
+    /// POST builder with the Authorization header when a key is set.
+    fn post(&self, url: &str, api_key: Option<&str>) -> reqwest::RequestBuilder {
+        let request = self.client.post(url).header("Content-Type", "application/json");
+        match api_key {
+            Some(key) => request.header("Authorization", format!("Bearer {}", key)),
+            None => request,
+        }
     }
 
     fn build_messages(messages: &[Message]) -> Vec<serde_json::Value> {
@@ -105,10 +134,7 @@ impl LLMProvider for OpenAICompatProvider {
         }
 
         let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
+            .post(&url, api_key.as_deref())
             .json(&body)
             .send()
             .await?;
@@ -182,10 +208,7 @@ impl LLMProvider for OpenAICompatProvider {
         }
 
         let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
+            .post(&url, api_key.as_deref())
             .json(&body)
             .send()
             .await?;
@@ -234,24 +257,22 @@ impl LLMProvider for OpenAICompatProvider {
             };
 
             // Extract usage from the final chunk (stream_options.include_usage)
-            if let Some(usage) = chunk.get("usage") {
-                if !usage.is_null() {
+            if let Some(usage) = chunk.get("usage")
+                && !usage.is_null() {
                     input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
                     output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
                     tokens_used = usage["total_tokens"].as_u64().unwrap_or(0) as u32;
                 }
-            }
 
             let delta = &chunk["choices"][0]["delta"];
 
             // Content tokens
-            if let Some(text) = delta["content"].as_str() {
-                if !text.is_empty() {
+            if let Some(text) = delta["content"].as_str()
+                && !text.is_empty() {
                     let owned = text.to_string();
                     let _ = token_tx.send(owned.clone());
                     content_parts.push(owned);
                 }
-            }
 
             // Tool call deltas
             if let Some(tool_calls) = delta["tool_calls"].as_array() {
@@ -323,5 +344,57 @@ impl LLMProvider for OpenAICompatProvider {
 
     fn name(&self) -> &str {
         &self.config.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn config(api_key: Option<&str>, base_url: String) -> ProviderConfig {
+        ProviderConfig {
+            id: "p".to_string(),
+            name: "lmstudio".to_string(),
+            api_key: api_key.map(str::to_string),
+            base_url,
+            model: "qwen2.5-7b-instruct".to_string(),
+            is_active: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_server_needs_no_key_and_sends_none() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (req_tx, req_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16 * 1024];
+            let n = socket.read(&mut buf).await.unwrap();
+            let _ = req_tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"Hi there"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let provider = OpenAICompatProvider::new_local(config(None, format!("http://{}/v1", addr)), "LM Studio", "");
+        let response = provider.chat(vec![Message::text("user", "hi")], None).await.unwrap();
+
+        assert_eq!(response.content.as_deref(), Some("Hi there"));
+        let request = req_rx.await.unwrap().to_lowercase();
+        assert!(request.starts_with("post /v1/chat/completions"));
+        assert!(!request.contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn cloud_provider_still_requires_a_key() {
+        let provider = OpenAICompatProvider::new(config(None, String::new()), "OpenAI", "https://api.openai.com/v1");
+        let err = provider.chat(vec![Message::text("user", "hi")], None).await.unwrap_err();
+        assert!(matches!(err, LLMError::NoApiKey(_)));
     }
 }

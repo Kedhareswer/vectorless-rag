@@ -10,6 +10,7 @@
 
 use crate::document::tree::DocumentTree;
 use crate::llm::local;
+use crate::util::safe_truncate;
 use std::collections::HashSet;
 
 /// Minimum content length (chars) to bother enriching a node.
@@ -47,8 +48,8 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
 
         // Hybrid entity extraction: heuristic regex + SLM (union of both)
         let mut entities = extract_entities(&content);
-        if use_slm {
-            if let Ok(slm_ents) = slm_entities(&content) {
+        if use_slm
+            && let Ok(slm_ents) = slm_entities(&content) {
                 for e in slm_ents {
                     if !entities.contains(&e) {
                         entities.push(e);
@@ -56,12 +57,11 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
                 }
                 entities.truncate(15);
             }
-        }
 
         // Hybrid topic extraction: heuristic TF + SLM
         let mut topics = extract_topics(&content);
-        if use_slm {
-            if let Ok(slm_tops) = slm_topics(&content) {
+        if use_slm
+            && let Ok(slm_tops) = slm_topics(&content) {
                 for t in slm_tops {
                     if !topics.contains(&t) {
                         topics.push(t);
@@ -69,7 +69,6 @@ pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {
                 }
                 topics.truncate(8);
             }
-        }
 
         if let Some(node) = tree.nodes.get_mut(child_id) {
             // Only set summary if node doesn't already have one
@@ -123,11 +122,7 @@ fn gather_node_content(tree: &DocumentTree, node_id: &str) -> String {
 /// SLM-generated summary using the loaded local GGUF model.
 /// Returns a 1-2 sentence summary of the provided content.
 fn slm_summary(content: &str) -> Result<String, String> {
-    let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
-        &content[..MAX_CONTENT_FOR_SUMMARY]
-    } else {
-        content
-    };
+    let truncated = safe_truncate(content, MAX_CONTENT_FOR_SUMMARY);
     let system = "You are a document analysis assistant. Write a concise 1-2 sentence summary of the provided text. Only output the summary, nothing else.";
     let user = format!("Summarize this document section:\n\n{}", truncated);
     let result = local::chat_inference(system, &user, 80)?;
@@ -141,11 +136,7 @@ fn slm_summary(content: &str) -> Result<String, String> {
 /// SLM-extracted entities (names, dates, amounts, organizations).
 /// Returns entities the SLM found that heuristic regex might miss.
 fn slm_entities(content: &str) -> Result<Vec<String>, String> {
-    let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
-        &content[..MAX_CONTENT_FOR_SUMMARY]
-    } else {
-        content
-    };
+    let truncated = safe_truncate(content, MAX_CONTENT_FOR_SUMMARY);
     let system = "Extract key entities (names, dates, amounts, organizations) from the text. Output ONLY a comma-separated list, nothing else.";
     let user = truncated.to_string();
     let result = local::chat_inference(system, &user, 100)?;
@@ -154,11 +145,7 @@ fn slm_entities(content: &str) -> Result<Vec<String>, String> {
 
 /// SLM-generated topic keywords.
 fn slm_topics(content: &str) -> Result<Vec<String>, String> {
-    let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
-        &content[..MAX_CONTENT_FOR_SUMMARY]
-    } else {
-        content
-    };
+    let truncated = safe_truncate(content, MAX_CONTENT_FOR_SUMMARY);
     let system = "List 3-5 topic keywords for this text. Output ONLY a comma-separated list, nothing else.";
     let user = truncated.to_string();
     let result = local::chat_inference(system, &user, 40)?;
@@ -175,11 +162,7 @@ fn parse_csv_list(text: &str) -> Vec<String> {
 
 /// Extractive summary: pick the first 1-2 meaningful sentences.
 fn extractive_summary(content: &str) -> String {
-    let truncated = if content.len() > MAX_CONTENT_FOR_SUMMARY {
-        &content[..MAX_CONTENT_FOR_SUMMARY]
-    } else {
-        content
-    };
+    let truncated = safe_truncate(content, MAX_CONTENT_FOR_SUMMARY);
 
     // Split into sentences (simple heuristic)
     let sentences: Vec<&str> = truncated
@@ -190,8 +173,7 @@ fn extractive_summary(content: &str) -> String {
 
     if sentences.is_empty() {
         // Fall back to first N chars
-        let end = content.len().min(150);
-        return content[..end].to_string();
+        return safe_truncate(content, 150).to_string();
     }
 
     // Take first 2 sentences
@@ -315,7 +297,8 @@ fn extract_topics(content: &str) -> Vec<String> {
     }
 
     let mut sorted: Vec<(String, usize)> = freq.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    // Highest frequency first; ties broken alphabetically so output is deterministic.
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     sorted.into_iter().take(5).map(|(w, _)| w).collect()
 }
@@ -422,6 +405,16 @@ pub fn discover_cross_doc_relations(trees: &[DocumentTree]) -> Vec<DiscoveredRel
 mod tests {
     use super::*;
     use crate::document::tree::{DocType, NodeType, TreeNode};
+
+    #[test]
+    fn extractive_summary_does_not_split_multibyte_chars() {
+        // Short fragments force the first-N-chars fallback; with 2-byte 'é' the
+        // 150- and 2000-byte cut points land mid-character.
+        let content = "ééééé.".repeat(400);
+        let summary = extractive_summary(&content);
+        assert!(!summary.is_empty());
+        assert!(summary.len() <= 150);
+    }
 
     #[test]
     fn enrich_adds_metadata_to_nodes() {

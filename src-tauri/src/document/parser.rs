@@ -336,7 +336,7 @@ fn slm_classify_heading(line: &str, context: &str) -> Option<u32> {
     let user = format!(
         "Line: \"{}\"\nContext: \"{}\"",
         trimmed,
-        &context[..context.len().min(200)]
+        crate::util::safe_truncate(context, 200)
     );
 
     let result = match local::chat_inference(system, &user, 10) {
@@ -349,10 +349,11 @@ fn slm_classify_heading(line: &str, context: &str) -> Option<u32> {
         Some(1)
     } else if lower.contains("heading:2") || lower.contains("heading: 2") {
         Some(2)
-    } else if lower.contains("heading:3") || lower.contains("heading: 3") {
-        Some(3)
-    } else if lower.starts_with("heading") {
-        Some(3) // generic heading without level → subsection
+    } else if lower.contains("heading:3")
+        || lower.contains("heading: 3")
+        || lower.starts_with("heading")
+    {
+        Some(3) // level 3, or generic heading without level → subsection
     } else {
         None
     }
@@ -509,13 +510,12 @@ fn flush_paragraph(
 
 impl DocumentParser for PdfParser {
     fn parse(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
-        // Try LiteParse first if available — better layout-aware extraction.
-        // This is safe to call during ingest because metadata enrichment (the
-        // slow part) now runs in the background, not here.
-        if super::liteparse::is_available() {
-            if let Ok(tree) = self.parse_with_liteparse(file_path) {
-                return Ok(tree);
-            }
+        // LiteParse first: layout-aware headings, tables and lists. Falls back to
+        // pdf-extract when PDFium is unavailable or the PDF yields no text
+        // (e.g. scanned pages — OCR is not compiled in).
+        match super::liteparse::parse_pdf(file_path, file_name_of(file_path)) {
+            Ok(tree) => return Ok(tree),
+            Err(e) => eprintln!("LiteParse failed for {}, using pdf-extract: {}", file_path, e),
         }
 
         self.parse_with_pdf_extract(file_path)
@@ -523,91 +523,6 @@ impl DocumentParser for PdfParser {
 }
 
 impl PdfParser {
-    /// Parse using LiteParse (external npx tool) for better layout-aware extraction.
-    /// Not called automatically — available via explicit "Re-parse with LiteParse" action.
-    pub fn parse_with_liteparse(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
-        let json = super::liteparse::parse_pdf(file_path)
-            .map_err(|e| ParseError::Other(e))?;
-        let blocks = super::liteparse::extract_text_blocks(&json);
-        if blocks.is_empty() {
-            return Err(ParseError::Other("LiteParse returned no content".to_string()));
-        }
-
-        let file_name = file_name_of(file_path);
-        let mut tree = DocumentTree::new(file_name, DocType::Pdf);
-        let root_id = tree.root_id.clone();
-
-        if let Some(root) = tree.nodes.get_mut(&root_id) {
-            root.metadata.insert("page_count".to_string(), serde_json::json!(blocks.len()));
-            root.metadata.insert("parse_source".to_string(), serde_json::json!("liteparse"));
-        }
-
-        // Process each page's text through the same heading detection pipeline.
-        let mut section_stack: Vec<(u32, String)> = Vec::new();
-        let mut current_parent = root_id.clone();
-        let mut para_buffer = String::new();
-
-        for (text, page_num) in &blocks {
-            let lines: Vec<&str> = text.lines().collect();
-            for raw_line in lines {
-                let trimmed = raw_line.trim();
-                if trimmed.is_empty() {
-                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    continue;
-                }
-
-                if let Some(level) = detect_heading(trimmed) {
-                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    let title = trimmed[..trimmed.len().min(80)].to_string();
-
-                    while section_stack.last().is_some_and(|(l, _)| *l >= level) {
-                        section_stack.pop();
-                    }
-                    let parent = section_stack
-                        .last()
-                        .map(|(_, id)| id.clone())
-                        .unwrap_or_else(|| root_id.clone());
-
-                    let mut section = TreeNode::new(NodeType::Section, title);
-                    section.metadata.insert("heading_level".to_string(), serde_json::json!(level));
-                    section.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
-                    let section_id = section.id.clone();
-                    let _ = tree.add_node(&parent, section);
-                    section_stack.push((level, section_id.clone()));
-                    current_parent = section_id;
-                } else if let Some(level) = slm_classify_heading(trimmed, &para_buffer) {
-                    flush_paragraph(&mut tree, &current_parent, &mut para_buffer, *page_num);
-                    let title = trimmed[..trimmed.len().min(80)].to_string();
-
-                    while section_stack.last().is_some_and(|(l, _)| *l >= level) {
-                        section_stack.pop();
-                    }
-                    let parent = section_stack
-                        .last()
-                        .map(|(_, id)| id.clone())
-                        .unwrap_or_else(|| root_id.clone());
-
-                    let mut section = TreeNode::new(NodeType::Section, title);
-                    section.metadata.insert("heading_level".to_string(), serde_json::json!(level));
-                    section.metadata.insert("heading_source".to_string(), serde_json::json!("slm"));
-                    section.metadata.insert("page_number".to_string(), serde_json::json!(page_num));
-                    let section_id = section.id.clone();
-                    let _ = tree.add_node(&parent, section);
-                    section_stack.push((level, section_id.clone()));
-                    current_parent = section_id;
-                } else {
-                    if !para_buffer.is_empty() {
-                        para_buffer.push('\n');
-                    }
-                    para_buffer.push_str(trimmed);
-                }
-            }
-        }
-
-        flush_paragraph(&mut tree, &current_parent, &mut para_buffer, blocks.len());
-        Ok(tree)
-    }
-
     /// Parse using the built-in pdf-extract crate (default/fallback).
     fn parse_with_pdf_extract(&self, file_path: &str) -> Result<DocumentTree, ParseError> {
         let file_name = file_name_of(file_path);
@@ -806,8 +721,10 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
+    // No trim_text: entity refs arrive as separate events, so trimming each Text
+    // event would drop the spaces around them ("Tom &amp; Jerry" -> "Tom&Jerry").
+    // Paragraph and cell text is trimmed once it is complete.
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
 
     let mut buf = Vec::new();
     let mut current_text = String::new();
@@ -823,29 +740,29 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
     while let Ok(event) = reader.read_event_into(&mut buf) {
         match event {
             Event::Start(ref e) => match e.local_name().as_ref() {
-                b"p" if !in_table => {
+                "p" if !in_table => {
                     in_para = true;
                     current_text.clear();
                     para_style.clear();
                 }
-                b"tbl" => {
+                "tbl" => {
                     in_table = true;
                     let node = TreeNode::new(NodeType::Table, "Table".to_string());
                     let id = node.id.clone();
                     let _ = tree.add_node(&current_parent, node);
                     table_id = Some(id);
                 }
-                b"tr" => { row_cells.clear(); }
-                b"tc" => { cell_text.clear(); }
+                "tr" => { row_cells.clear(); }
+                "tc" => { cell_text.clear(); }
                 _ => {}
             },
 
             Event::Empty(ref e) => {
-                if e.local_name().as_ref() == b"pStyle" {
+                if e.local_name().as_ref() == "pStyle" {
                     for attr in e.attributes().flatten() {
-                        let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                        let key: &str = attr.key.as_ref();
                         if key == "w:val" || key == "val" {
-                            let val = std::str::from_utf8(&attr.value).unwrap_or("").to_string();
+                            let val = attr.value.to_string();
                             if val.to_lowercase().starts_with("heading") {
                                 para_style = val;
                             }
@@ -855,7 +772,7 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
             }
 
             Event::End(ref e) => match e.local_name().as_ref() {
-                b"p" if !in_table => {
+                "p" if !in_table => {
                     let trimmed = current_text.trim().to_string();
                     if !trimmed.is_empty() {
                         if para_style.to_lowercase().starts_with("heading") {
@@ -887,29 +804,45 @@ fn parse_docx_xml(xml: &str, tree: &mut DocumentTree, root_id: &str) {
                     para_style.clear();
                     current_text.clear();
                 }
-                b"tc" => {
+                "tc" => {
                     row_cells.push(cell_text.trim().to_string());
                     cell_text.clear();
                 }
-                b"tr" => {
-                    if !row_cells.is_empty() {
-                        if let Some(ref tid) = table_id.clone() {
+                "tr" => {
+                    if !row_cells.is_empty()
+                        && let Some(ref tid) = table_id.clone() {
                             let row_node = TreeNode::new(NodeType::TableRow, row_cells.join(" | "));
                             let _ = tree.add_node(tid, row_node);
                         }
-                    }
                     row_cells.clear();
                 }
-                b"tbl" => { in_table = false; table_id = None; }
+                "tbl" => { in_table = false; table_id = None; }
                 _ => {}
             },
 
             Event::Text(ref e) => {
-                let text = e.unescape().unwrap_or_default();
+                let text = e.xml10_content();
                 if in_table {
                     cell_text.push_str(&text);
                 } else if in_para {
                     current_text.push_str(&text);
+                }
+            }
+
+            // quick-xml reports `&amp;` / `&#8217;` etc. as separate events, not inside Text.
+            Event::GeneralRef(ref e) => {
+                let resolved = match e.resolve_char_ref() {
+                    Ok(Some(c)) => Some(c.to_string()),
+                    _ => quick_xml::escape::unescape(&format!("&{};", &**e))
+                        .ok()
+                        .map(|s| s.into_owned()),
+                };
+                if let Some(text) = resolved {
+                    if in_table {
+                        cell_text.push_str(&text);
+                    } else if in_para {
+                        current_text.push_str(&text);
+                    }
                 }
             }
 
@@ -1155,6 +1088,29 @@ pub fn get_parser_for_file(path: &str) -> Box<dyn DocumentParser> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- DOCX XML tests ---
+
+    #[test]
+    fn docx_xml_resolves_entities_and_keeps_spacing() {
+        let xml = r#"<w:document><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>R&amp;D Plan</w:t></w:r></w:p>
+<w:p><w:r><w:t xml:space="preserve">Tom &amp; Jerry&#8217;s &lt;show&gt;</w:t></w:r></w:p>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>A &amp; B</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>"#;
+        let mut tree = DocumentTree::new("t.docx".to_string(), DocType::Word);
+        let root_id = tree.root_id.clone();
+        parse_docx_xml(xml, &mut tree, &root_id);
+
+        let contents: Vec<(NodeType, String)> = tree
+            .nodes
+            .values()
+            .map(|n| (n.node_type.clone(), n.content.clone()))
+            .collect();
+        assert!(contents.contains(&(NodeType::Section, "R&D Plan".to_string())));
+        assert!(contents.contains(&(NodeType::Paragraph, "Tom & Jerry\u{2019}s <show>".to_string())));
+        assert!(contents.contains(&(NodeType::TableRow, "A & B | C".to_string())));
+    }
 
     // --- detect_heading tests ---
 

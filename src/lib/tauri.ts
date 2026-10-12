@@ -1,4 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 // Types matching Rust structs
 
@@ -170,6 +171,8 @@ export const getConversationMessages = (convId: string) => invoke<MessageRecord[
 export const saveMessageIPC = (id: string, convId: string, role: string, content: string) =>
   invoke<void>('save_message', { id, convId, role, content });
 export const deleteConversationIPC = (convId: string) => invoke<void>('delete_conversation', { convId });
+export const renameConversationIPC = (convId: string, title: string) =>
+  invoke<void>('rename_conversation', { convId, title });
 
 // Conversation-Document associations (documents scoped per chat)
 export const addDocToConversation = (convId: string, docId: string) =>
@@ -226,6 +229,46 @@ export const downloadLocalModel = (
 };
 export const deleteLocalModel = () => invoke<void>('delete_local_model');
 
+/** A model server already running on this machine (Ollama, LM Studio). */
+export interface LocalServer {
+  /** Provider name to configure: 'ollama' | 'lmstudio'. */
+  provider: string;
+  label: string;
+  base_url: string;
+  models: string[];
+}
+export const detectLocalModels = () => invoke<LocalServer[]>('detect_local_models');
+
+// Dictation (offline Whisper speech-to-text)
+export interface DictationModelOption {
+  id: string;
+  name: string;
+  description: string;
+  size_bytes: number;
+  size_label: string;
+}
+
+export interface DictationStatus {
+  downloaded: boolean;
+  model_id: string | null;
+  loaded: boolean;
+}
+
+export const getDictationOptions = () => invoke<DictationModelOption[]>('get_dictation_options');
+export const checkDictationModel = () => invoke<DictationStatus>('check_dictation_model');
+export const downloadDictationModel = (
+  modelId: string,
+  onProgress: (progress: DownloadProgress) => void,
+) => {
+  const channel = new Channel<DownloadProgress>();
+  channel.onmessage = onProgress;
+  return invoke<void>('download_dictation_model', { modelId, onProgress: channel });
+};
+export const deleteDictationModel = () => invoke<void>('delete_dictation_model');
+/** Transcribe 16 kHz mono PCM samples. */
+export const transcribeAudio = (samples: Float32Array) =>
+  invoke<string>('transcribe_audio', { samples: Array.from(samples) });
+
 // Cross-doc relations
 export interface CrossDocRelation {
   id: string;
@@ -268,3 +311,7 @@ export const reenrichDocument = (docId: string) =>
 
 // Clear ALL app data (DB, model file, keychain). Frontend must reload after this.
 export const clearAppData = () => invoke<void>('clear_app_data');
+
+// ── External links ──
+/** Open a web page in the user's default browser. */
+export const openExternal = (url: string) => openUrl(url);

@@ -1,89 +1,100 @@
-import { Sun, Moon, Settings, FileText, Activity, Menu } from 'lucide-react';
+import { ChevronDown, FileText, Activity, Settings, SquarePen } from 'lucide-react';
 import clsx from 'clsx';
-import { useThemeStore } from '../../stores/theme';
+import { withShortcut } from '../../lib/shortcuts';
 import styles from './TopBar.module.css';
 
 interface TopBarProps {
   chatTitle: string | null;
-  onMenuClick: () => void;
-  onSettingsClick: () => void;
+  switcherOpen: boolean;
+  onSwitcherToggle: () => void;
+  onNewChat: () => void;
+  docsCount: number;
   docsPanelOpen: boolean;
   onDocsToggle: () => void;
   tracePanelOpen: boolean;
   onTraceToggle: () => void;
+  onSettingsClick: () => void;
 }
 
 export function TopBar({
   chatTitle,
-  onMenuClick,
-  onSettingsClick,
+  switcherOpen,
+  onSwitcherToggle,
+  onNewChat,
+  docsCount,
   docsPanelOpen,
   onDocsToggle,
   tracePanelOpen,
   onTraceToggle,
+  onSettingsClick,
 }: TopBarProps) {
-  const { resolvedTheme, setTheme, theme } = useThemeStore();
-
-  const cycleTheme = () => {
-    if (theme === 'light') setTheme('dark');
-    else if (theme === 'dark') setTheme('system');
-    else setTheme('light');
-  };
-
   return (
-    <div className={styles.topBar}>
+    <header className={styles.topBar}>
       <button
-        className={styles.menuButton}
-        onClick={onMenuClick}
-        title="Conversations"
         type="button"
+        className={clsx(styles.titleButton, switcherOpen && styles.titleButtonOpen)}
+        onClick={onSwitcherToggle}
+        title={withShortcut('Switch chat', 'switchChat')}
+        aria-haspopup="dialog"
+        aria-expanded={switcherOpen}
+        aria-label={`Chats${chatTitle ? `: ${chatTitle}` : ''}`}
       >
-        <Menu size={18} />
+        <span className={clsx(styles.chatTitle, !chatTitle && styles.chatTitleEmpty)}>
+          {chatTitle || 'Select a chat'}
+        </span>
+        <ChevronDown size={14} className={styles.titleChevron} />
       </button>
 
-      <span className={clsx(styles.chatTitle, !chatTitle && styles.chatTitleEmpty)}>
-        {chatTitle || 'TGG'}
-      </span>
+      <button
+        type="button"
+        className={styles.iconBtn}
+        onClick={onNewChat}
+        title={withShortcut('New chat', 'newChat')}
+        aria-label="New chat"
+      >
+        <SquarePen size={16} />
+      </button>
 
-      <div className={styles.actions}>
+      <div className={styles.spacer} />
+
+      <nav className={styles.actions} aria-label="Panels">
         <button
-          className={styles.iconBtn}
-          onClick={cycleTheme}
-          title={`Theme: ${theme} (click to cycle)`}
           type="button"
+          className={clsx(styles.labelBtn, docsPanelOpen && styles.btnActive)}
+          onClick={onDocsToggle}
+          title={withShortcut('Documents in this chat', 'documents')}
+          aria-label="Documents"
+          aria-pressed={docsPanelOpen}
         >
-          {resolvedTheme === 'dark' ? <Moon size={16} /> : <Sun size={16} />}
+          <FileText size={15} />
+          <span className={styles.btnText}>Documents</span>
+          {docsCount > 0 && <span className={styles.countBadge}>{docsCount}</span>}
         </button>
 
         <button
-          className={styles.iconBtn}
-          onClick={onSettingsClick}
-          title="Settings"
           type="button"
+          className={clsx(styles.labelBtn, tracePanelOpen && styles.btnActive)}
+          onClick={onTraceToggle}
+          title={withShortcut('Trace & evaluation', 'trace')}
+          aria-label="Trace"
+          aria-pressed={tracePanelOpen}
         >
-          <Settings size={16} />
+          <Activity size={15} />
+          <span className={styles.btnText}>Trace</span>
         </button>
 
         <div className={styles.divider} />
 
         <button
-          className={clsx(styles.iconBtn, docsPanelOpen && styles.iconBtnActive)}
-          onClick={onDocsToggle}
-          title="Documents"
           type="button"
+          className={styles.iconBtn}
+          onClick={onSettingsClick}
+          title={withShortcut('Settings', 'settings')}
+          aria-label="Settings"
         >
-          <FileText size={16} />
+          <Settings size={16} />
         </button>
-
-        <button
-          className={clsx(styles.iconBtn, tracePanelOpen && styles.iconBtnActive)}
-          onClick={onTraceToggle}
-          title="Trace & Evaluation"
-          type="button"
-        >
-          <Activity size={16} />
-        </button>
-      </div>
-    </div>
+      </nav>
+    </header>
   );
 }

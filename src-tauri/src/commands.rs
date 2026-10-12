@@ -13,6 +13,7 @@ use crate::document::metadata::enrich_tree_metadata;
 use crate::document::parser::get_parser_for_file;
 use crate::document::tree::{DocumentTree, RichNodeSummary, TreeNode, TreeNodeSummary};
 use crate::document::image::extract_images_from_path;
+use crate::llm::dictation;
 use crate::llm::local::{self, DownloadProgress, LocalModelStatus, ModelOption};
 use crate::llm::provider::ProviderConfig;
 use crate::validation;
@@ -321,6 +322,16 @@ pub fn delete_conversation(db: State<Database>, conv_id: String) -> Result<(), S
     db.delete_conversation(&conv_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn rename_conversation(db: State<Database>, conv_id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Title cannot be empty".to_string());
+    }
+    db.update_conversation_title(&conv_id, crate::util::safe_truncate(title, 200))
+        .map_err(|e| e.to_string())
+}
+
 // --- Conversation-Document association commands ---
 
 #[tauri::command]
@@ -466,6 +477,12 @@ pub async fn download_local_model(
     db.set_setting("local_model_path", &dest.to_string_lossy())
         .map_err(|e| e.to_string())?;
 
+    // Start using the new model now rather than after a restart.
+    let model_path = dest.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || local::switch_engine(&model_path))
+        .await
+        .map_err(|e| format!("Model load task failed: {}", e))??;
+
     Ok(())
 }
 
@@ -477,6 +494,76 @@ pub fn delete_local_model(
     let app_data = app.path().app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {}", e))?;
     local::delete_local_model(&app_data, &db)
+}
+
+/// Model servers already running on this machine (Ollama, LM Studio) and
+/// their installed models.
+#[tauri::command]
+pub async fn detect_local_models() -> Vec<crate::llm::local_servers::LocalServer> {
+    crate::llm::local_servers::detect().await
+}
+
+// ── Dictation (offline Whisper) ──────────────────────────────────────
+
+#[tauri::command]
+pub fn get_dictation_options() -> Vec<dictation::DictationModelOption> {
+    dictation::get_options()
+}
+
+#[tauri::command]
+pub fn check_dictation_model(
+    app: tauri::AppHandle,
+    db: State<Database>,
+) -> Result<dictation::DictationStatus, String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    Ok(dictation::status(&app_data, &db))
+}
+
+#[tauri::command]
+pub async fn download_dictation_model(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    on_progress: Channel<DownloadProgress>,
+    model_id: String,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DownloadProgress>();
+    let forwarder = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            let _ = on_progress.send(progress);
+        }
+    });
+    let result = dictation::download(&app_data, &db, &model_id, tx).await;
+    let _ = forwarder.await;
+    result
+}
+
+#[tauri::command]
+pub fn delete_dictation_model(
+    app: tauri::AppHandle,
+    db: State<Database>,
+) -> Result<(), String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    dictation::delete(&app_data, &db)
+}
+
+/// Transcribe 16 kHz mono PCM samples recorded by the frontend.
+#[tauri::command]
+pub async fn transcribe_audio(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    samples: Vec<f32>,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let model_id = dictation::selected_model(&db)
+        .ok_or("No dictation model downloaded.")?;
+    tokio::task::spawn_blocking(move || dictation::transcribe(&app_data, &model_id, &samples))
+        .await
+        .map_err(|e| format!("Transcription task failed: {}", e))?
 }
 
 // --- Re-enrich command ---
@@ -786,13 +873,12 @@ pub fn clear_app_data(
 
         // Also wipe the llama-server binary on full reset (unlike "Remove model" which keeps it)
         let bdir = local::bin_dir(&app_data);
-        if bdir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&bdir) {
+        if bdir.exists()
+            && let Ok(entries) = std::fs::read_dir(&bdir) {
                 for entry in entries.flatten() {
                     let _ = std::fs::remove_file(entry.path());
                 }
             }
-        }
 
         // Delete the SQLite database file(s) — the .db, .db-wal, .db-shm
         for suffix in &["vectorless-rag.db", "vectorless-rag.db-wal", "vectorless-rag.db-shm"] {

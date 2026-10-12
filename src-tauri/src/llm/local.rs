@@ -9,8 +9,9 @@
 //! ## What gets downloaded
 //!
 //! When the user clicks "Download" in the Settings → Local Model dialog:
-//!   1. The GGUF model file (e.g. Qwen2.5 0.5B Q4, ~491 MB)
-//!   2. The tokenizer.json from the same HuggingFace repo (~2 MB)
+//!   1. The GGUF model file (default: Liquid LFM2.5-1.2B-Instruct, ~700 MB)
+//!   2. Its tokenizer.json from the model's HuggingFace repo, saved as
+//!      `<model-stem>.tokenizer.json` so models never share a tokenizer
 //!
 //! Both are saved to `<app-data>/models/`.
 //!
@@ -37,15 +38,21 @@ pub fn is_engine_loaded() -> bool {
     slm::is_engine_loaded()
 }
 
-/// Load the SLM engine from a downloaded GGUF model.
-/// Resolves the tokenizer path automatically (same directory, `tokenizer.json`).
+/// Tokenizer file for a model: `<model-stem>.tokenizer.json` beside the GGUF.
+/// Installs from before per-model tokenizers used a shared `tokenizer.json`,
+/// which is still accepted when the per-model file is missing.
+pub fn tokenizer_path_for(model_path: &Path) -> PathBuf {
+    let dir = model_path.parent().unwrap_or(Path::new("."));
+    let stem = model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let own = dir.join(format!("{}.tokenizer.json", stem));
+    let legacy = dir.join("tokenizer.json");
+    if !own.exists() && legacy.exists() { legacy } else { own }
+}
+
+/// Load the SLM engine from a downloaded GGUF model and its tokenizer.
 /// No-op if already loaded.
 pub fn load_engine(model_path: &str) -> Result<(), String> {
-    let model = Path::new(model_path);
-    let tokenizer_path = model
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("tokenizer.json");
+    let tokenizer_path = tokenizer_path_for(Path::new(model_path));
 
     if !tokenizer_path.exists() {
         return Err(format!(
@@ -62,10 +69,37 @@ pub fn unload_engine() {
     slm::unload_engine()
 }
 
+/// Replace whatever model is loaded with `model_path` (e.g. after a download).
+/// Blocking — reads the weights from disk.
+pub fn switch_engine(model_path: &str) -> Result<(), String> {
+    slm::unload_engine();
+    load_engine(model_path)
+}
+
 /// Run a chat-style completion against the loaded SLM.
 /// Blocking — must not be called from async context directly.
 pub fn chat_inference(system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
     slm::chat_inference(system, user, max_tokens)
+}
+
+/// Answer a multi-turn conversation with the local model, streaming text.
+/// Blocking — must not be called from async context directly.
+pub fn generate_conversation(
+    turns: &[(&str, &str)],
+    opts: slm::GenerateOptions<'_>,
+) -> Result<slm::Generation, String> {
+    slm::generate_conversation(turns, opts)
+}
+
+/// Like `chat_inference`, but also reports token counts and can be cancelled.
+/// Blocking — must not be called from async context directly.
+pub fn generate(
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<slm::Generation, String> {
+    slm::generate(system, user, max_tokens, cancel)
 }
 
 // ── Directory helpers ─────────────────────────────────────────────────
@@ -120,54 +154,49 @@ pub struct DownloadProgress {
     pub phase: String,
 }
 
-/// Available models for download.
+/// Available models for download. The first entry is the recommended default.
+///
+/// One model does everything local: query enrichment and, with the "Local
+/// (offline)" provider, the answers themselves. LFM2.5-1.2B-Instruct is
+/// Liquid AI's recommended model for answering from supplied documents (it
+/// replaces their deprecated LFM2-1.2B-RAG). The QAD Q4_0 files are Liquid's
+/// quantization-aware-distilled 4-bit checkpoints (~97% of full-precision
+/// quality). The 230M model is a lightweight option for enrichment only.
 pub fn get_model_options() -> Vec<ModelOption> {
     vec![
         ModelOption {
-            id: "qwen2.5-0.5b-q4".to_string(),
-            name: "Qwen2.5 0.5B (Q4)".to_string(),
-            description: "Smallest download, fast enrichment. Recommended.".to_string(),
-            size_bytes: 491_400_032,
-            size_label: "~491 MB".to_string(),
-            url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string(),
-            filename: "qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string(),
+            id: "lfm2.5-1.2b-instruct-qad-q4".to_string(),
+            name: "LFM2.5 1.2B Instruct".to_string(),
+            description: "Answers questions offline and improves search. Recommended.".to_string(),
+            size_bytes: 700_000_000,
+            size_label: "~700 MB".to_string(),
+            url: "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf".to_string(),
+            filename: "LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf".to_string(),
             sha256: None,
-            tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json".to_string(),
+            tokenizer_url: "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/resolve/main/tokenizer.json".to_string(),
         },
         ModelOption {
-            id: "qwen2.5-0.5b-q8".to_string(),
-            name: "Qwen2.5 0.5B (Q8)".to_string(),
-            description: "Better quality summaries, moderate download.".to_string(),
-            size_bytes: 675_710_816,
-            size_label: "~676 MB".to_string(),
-            url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf".to_string(),
-            filename: "qwen2.5-0.5b-instruct-q8_0.gguf".to_string(),
+            id: "lfm2.5-230m-qad-q4".to_string(),
+            name: "LFM2.5 230M (lightweight)".to_string(),
+            description: "Search help only — too small for reliable answers. For low-memory PCs.".to_string(),
+            size_bytes: 150_000_000,
+            size_label: "~150 MB".to_string(),
+            url: "https://huggingface.co/LiquidAI/LFM2.5-230M-GGUF/resolve/main/LFM2.5-230M-QAD-Q4_0.gguf".to_string(),
+            filename: "LFM2.5-230M-QAD-Q4_0.gguf".to_string(),
             sha256: None,
-            tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json".to_string(),
-        },
-        ModelOption {
-            id: "qwen2.5-1.5b-q4".to_string(),
-            name: "Qwen2.5 1.5B (Q4)".to_string(),
-            description: "Highest quality enrichment, larger download.".to_string(),
-            size_bytes: 1_117_320_736,
-            size_label: "~1.1 GB".to_string(),
-            url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf".to_string(),
-            filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf".to_string(),
-            sha256: None,
-            tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/resolve/main/tokenizer.json".to_string(),
+            tokenizer_url: "https://huggingface.co/LiquidAI/LFM2.5-230M/resolve/main/tokenizer.json".to_string(),
         },
     ]
 }
 
 // ── Model download ────────────────────────────────────────────────────
 
-/// Download tokenizer.json for the selected model if not already present.
+/// Download the model's tokenizer to `dest` if not already present.
 async fn download_tokenizer(
-    models_dir: &Path,
+    dest: PathBuf,
     tokenizer_url: &str,
     progress_tx: &mpsc::UnboundedSender<DownloadProgress>,
 ) -> Result<PathBuf, String> {
-    let dest = models_dir.join("tokenizer.json");
     if dest.exists() {
         let _ = progress_tx.send(DownloadProgress {
             downloaded_bytes: 0,
@@ -232,14 +261,11 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
     let model_id = db.get_setting("local_model_id").ok().flatten();
     let model_path = db.get_setting("local_model_path").ok().flatten();
 
-    if let (Some(ref id), Some(ref path)) = (&model_id, &model_path) {
+    if let (Some(id), Some(path)) = (&model_id, &model_path) {
         let p = Path::new(path);
         if p.exists() {
             let size = std::fs::metadata(p).map(|m| m.len()).ok();
-            let tokenizer_ready = p
-                .parent()
-                .map(|d| d.join("tokenizer.json").exists())
-                .unwrap_or(false);
+            let tokenizer_ready = tokenizer_path_for(p).exists();
             return LocalModelStatus {
                 downloaded: true,
                 model_id: Some(id.clone()),
@@ -252,8 +278,8 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
 
     // Scan models dir for any .gguf files (in case settings got cleared)
     let dir = models_dir(app_data);
-    if dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
+    if dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
@@ -263,7 +289,7 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
                         .and_then(|s| s.to_str())
                         .unwrap_or("unknown")
                         .to_string();
-                    let tokenizer_ready = dir.join("tokenizer.json").exists();
+                    let tokenizer_ready = tokenizer_path_for(&path).exists();
                     return LocalModelStatus {
                         downloaded: true,
                         model_id: Some(found_id),
@@ -274,7 +300,6 @@ pub fn check_local_model(app_data: &Path, db: &crate::db::Database) -> LocalMode
                 }
             }
         }
-    }
 
     LocalModelStatus {
         downloaded: false,
@@ -305,8 +330,12 @@ pub async fn download_model(
 
     let dest = dir.join(&model.filename);
 
-    // ── Phase 1: Download tokenizer.json ──
-    download_tokenizer(&dir, &model.tokenizer_url, &progress_tx)
+    // ── Phase 1: Download the model's tokenizer ──
+    let tokenizer_dest = dir.join(format!(
+        "{}.tokenizer.json",
+        dest.file_stem().and_then(|s| s.to_str()).unwrap_or("model")
+    ));
+    download_tokenizer(tokenizer_dest, &model.tokenizer_url, &progress_tx)
         .await
         .map_err(|e| {
             let _ = progress_tx.send(DownloadProgress {
@@ -323,9 +352,9 @@ pub async fn download_model(
     // ── Phase 2: Download the GGUF model file ──
 
     // Skip if already exists and non-empty
-    if dest.exists() {
-        if let Ok(meta) = std::fs::metadata(&dest) {
-            if meta.len() > 0 {
+    if dest.exists()
+        && let Ok(meta) = std::fs::metadata(&dest)
+            && meta.len() > 0 {
                 let _ = progress_tx.send(DownloadProgress {
                     downloaded_bytes: meta.len(),
                     total_bytes: meta.len(),
@@ -336,21 +365,44 @@ pub async fn download_model(
                 });
                 return Ok(dest);
             }
-        }
-    }
 
+    let label = format!("Downloading {}...", model.name);
+    let downloaded = download_file(&model.url, &dest, &label, model.size_bytes, &progress_tx).await?;
+
+    let _ = progress_tx.send(DownloadProgress {
+        downloaded_bytes: downloaded,
+        total_bytes: downloaded,
+        percent: 100.0,
+        done: true,
+        error: None,
+        phase: "Complete".to_string(),
+    });
+
+    Ok(dest)
+}
+
+/// Stream `url` to `dest` (via a `.tmp` file, renamed when complete), sending
+/// progress updates labelled `label`. Never sends `done: true`; callers do
+/// that once all of their files are in place. Returns the bytes written.
+pub async fn download_file(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    size_hint: u64,
+    progress_tx: &mpsc::UnboundedSender<DownloadProgress>,
+) -> Result<u64, String> {
     let _ = progress_tx.send(DownloadProgress {
         downloaded_bytes: 0,
         total_bytes: 0,
         percent: 0.0,
         done: false,
         error: None,
-        phase: format!("Downloading {}...", model.name),
+        phase: label.to_string(),
     });
 
     let client = reqwest::Client::new();
     let response = client
-        .get(&model.url)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("Download request failed: {}", e))?;
@@ -362,10 +414,11 @@ pub async fn download_model(
         ));
     }
 
-    let total = response.content_length().unwrap_or(model.size_bytes);
+    let total = response.content_length().unwrap_or(size_hint);
     let mut downloaded: u64 = 0;
 
-    let tmp_dest = dir.join(format!("{}.tmp", model.filename));
+    let file_name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("download");
+    let tmp_dest = dest.with_file_name(format!("{}.tmp", file_name));
     let mut file = tokio::fs::File::create(&tmp_dest)
         .await
         .map_err(|e| format!("Failed to create file: {}", e))?;
@@ -391,7 +444,7 @@ pub async fn download_model(
             percent,
             done: false,
             error: None,
-            phase: format!("Downloading {}...", model.name),
+            phase: label.to_string(),
         });
     }
 
@@ -408,12 +461,12 @@ pub async fn download_model(
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Rename tmp -> final. Fallback to copy+delete on Windows if rename fails.
-    if let Err(rename_err) = tokio::fs::rename(&tmp_dest, &dest).await {
+    if let Err(rename_err) = tokio::fs::rename(&tmp_dest, dest).await {
         eprintln!(
             "Rename failed ({}), falling back to copy+delete",
             rename_err
         );
-        tokio::fs::copy(&tmp_dest, &dest)
+        tokio::fs::copy(&tmp_dest, dest)
             .await
             .map_err(|e| {
                 format!(
@@ -424,16 +477,7 @@ pub async fn download_model(
         let _ = tokio::fs::remove_file(&tmp_dest).await;
     }
 
-    let _ = progress_tx.send(DownloadProgress {
-        downloaded_bytes: downloaded,
-        total_bytes: total,
-        percent: 100.0,
-        done: true,
-        error: None,
-        phase: "Complete".to_string(),
-    });
-
-    Ok(dest)
+    Ok(downloaded)
 }
 
 /// Delete the downloaded model, unload the engine, and clear settings.
@@ -448,19 +492,14 @@ pub fn delete_local_model(app_data: &Path, db: &crate::db::Database) -> Result<(
         }
     }
     let mdir = models_dir(app_data);
-    if mdir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&mdir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                    let _ = std::fs::remove_file(&path);
-                }
+    if let Ok(entries) = std::fs::read_dir(&mdir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Models, their tokenizers, and the legacy shared tokenizer.json.
+            if name.ends_with(".gguf") || name.ends_with("tokenizer.json") {
+                let _ = std::fs::remove_file(&path);
             }
-        }
-        // Also remove tokenizer.json
-        let tok = mdir.join("tokenizer.json");
-        if tok.exists() {
-            let _ = std::fs::remove_file(&tok);
         }
     }
 
@@ -487,6 +526,59 @@ mod tests {
             assert!(opt.filename.ends_with(".gguf"));
             assert!(!opt.tokenizer_url.is_empty());
         }
+    }
+
+    #[test]
+    fn default_model_is_the_answering_lfm2_5() {
+        let first = &get_model_options()[0];
+        assert_eq!(first.id, "lfm2.5-1.2b-instruct-qad-q4");
+        assert!(first.size_bytes < 1_000_000_000);
+        assert!(first.url.contains("LiquidAI/LFM2.5-1.2B-Instruct-GGUF"));
+    }
+
+    #[test]
+    fn model_options_have_unique_ids_and_filenames() {
+        let options = get_model_options();
+        let ids: std::collections::HashSet<_> = options.iter().map(|o| &o.id).collect();
+        let files: std::collections::HashSet<_> = options.iter().map(|o| &o.filename).collect();
+        assert_eq!(ids.len(), options.len());
+        assert_eq!(files.len(), options.len());
+    }
+
+    #[test]
+    fn tokenizer_path_prefers_per_model_file_over_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = tmp.path().join("LFM2.5-230M-QAD-Q4_0.gguf");
+        let own = tmp.path().join("LFM2.5-230M-QAD-Q4_0.tokenizer.json");
+        let legacy = tmp.path().join("tokenizer.json");
+
+        // Nothing on disk: points at the per-model file (where downloads go).
+        assert_eq!(tokenizer_path_for(&model), own);
+        // Only the legacy shared file: used for older installs.
+        std::fs::write(&legacy, b"{}").unwrap();
+        assert_eq!(tokenizer_path_for(&model), legacy);
+        // Both: the model's own tokenizer wins.
+        std::fs::write(&own, b"{}").unwrap();
+        assert_eq!(tokenizer_path_for(&model), own);
+    }
+
+    #[test]
+    fn delete_removes_per_model_tokenizers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db =
+            crate::db::Database::new(tmp.path().join("test.db").to_str().unwrap()).unwrap();
+        db.initialize().unwrap();
+        let models = models_dir(tmp.path());
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("a.gguf"), b"x").unwrap();
+        std::fs::write(models.join("a.tokenizer.json"), b"{}").unwrap();
+        std::fs::write(models.join("notes.txt"), b"keep").unwrap();
+
+        delete_local_model(tmp.path(), &db).unwrap();
+
+        assert!(!models.join("a.gguf").exists());
+        assert!(!models.join("a.tokenizer.json").exists());
+        assert!(models.join("notes.txt").exists());
     }
 
     #[test]

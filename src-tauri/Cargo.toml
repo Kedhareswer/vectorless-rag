@@ -3,46 +3,54 @@ name = "vectorless-rag"
 version = "0.1.0"
 description = "TGG — Tree-Grounded Generation"
 authors = ["you"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 
 [lib]
 name = "vectorless_rag_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.5", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2"
+tauri = { version = "2.12", features = [] }
+tauri-plugin-opener = "2.7"
+tauri-plugin-dialog = "2.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 r2d2 = "0.8"
-r2d2_sqlite = "0.25"
+r2d2_sqlite = "0.35"
 thiserror = "2"
-reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
 async-trait = "0.1"
-pulldown-cmark = "0.12"
-pdf-extract = "0.7"
-calamine = "0.26"
+pulldown-cmark = "0.13"
+pdf-extract = "0.12"
+calamine = "0.36"
 csv = "1"
-zip = "2"
+zip = "9"
 flate2 = "1"
 tar = "0.4"
-quick-xml = "0.37"
+quick-xml = "0.42"
 keyring = { version = "3", features = ["sync-secret-service", "windows-native", "apple-native"] }
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
-lopdf = "0.39"
+lopdf = "0.45"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-candle-core = "0.9"
-candle-transformers = "0.9"
-tokenizers = "0.21"
+candle-core = "0.11"
+candle-transformers = "0.11"
+candle-nn = "0.11"
+tokenizers = "0.23"
+# Layout-aware PDF parsing. OCR backends (tesseract / oar-ocr) are off: both pull
+# large native toolchains; scanned PDFs fall back to the pdf-extract parser.
+liteparse = { version = "2.15", default-features = false }
+# PDFium loader used by liteparse. Depended on directly so build.rs receives
+# DEP_PDFIUM_LIB_PATH and can bundle the shared library with the app.
+pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.11" }
 
 [dev-dependencies]
 tempfile = "3"

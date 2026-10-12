@@ -13,11 +13,9 @@ import styles from './ModelDownloadDialog.module.css';
 
 interface ModelDownloadDialogProps {
   onClose: () => void;
-  /** When true, shows onboarding framing (first-run experience) */
-  isOnboarding?: boolean;
 }
 
-export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDialogProps) {
+export function ModelDownloadDialog({ onClose }: ModelDownloadDialogProps) {
   const [options, setOptions] = useState<ModelOption[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reenriching, setReenriching] = useState(false);
@@ -37,7 +35,13 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
   } = useLocalModelStore();
 
   useEffect(() => {
-    getModelOptions().then(setOptions).catch(() => {});
+    getModelOptions()
+      .then((opts) => {
+        setOptions(opts);
+        // The backend lists the recommended model first.
+        setSelectedId((current) => current ?? opts[0]?.id ?? null);
+      })
+      .catch(() => {});
     refreshStatus();
     listDocuments().then(setExistingDocs).catch(() => {});
   }, [refreshStatus]);
@@ -81,7 +85,7 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
         <div className={styles.header}>
           <Cpu size={18} />
           <h2 className={styles.title}>
-            {isOnboarding ? 'Welcome to TGG' : 'Local Model for Document Enrichment'}
+            Offline Model
           </h2>
           <button type="button" className={styles.closeBtn} onClick={onClose}>
             <X size={16} />
@@ -89,9 +93,9 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
         </div>
 
         <p className={styles.description}>
-          {isOnboarding
-            ? 'TGG uses a small local AI model to enrich your documents with summaries, entities, and topics before you query them — making answers faster and more accurate. The model runs entirely on your device and is never sent to any server.'
-            : 'A small local AI model generates summaries and metadata for each document section, enabling faster and more accurate answers. The model runs entirely on your device.'}
+          One model for everything offline: it answers questions (choose "Local (offline)" as the
+          provider), improves search, and summarises document sections. It runs entirely on this
+          computer.
         </p>
 
         {status?.downloaded ? (
@@ -182,7 +186,7 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
 
         <div className={styles.footer}>
           <button type="button" className={styles.cancelBtn} onClick={onClose}>
-            {status?.downloaded ? 'Close' : isOnboarding ? 'Skip for now' : 'Cancel'}
+            {status?.downloaded ? 'Close' : 'Cancel'}
           </button>
           {!status?.downloaded && !isDownloading && (
             <button

@@ -90,6 +90,32 @@ pub fn fetch_content(
     }
 }
 
+impl FetchedContent {
+    /// Keep sections in fetch (relevance) order until `max_chars` of content;
+    /// the section that crosses the limit is cut at a char boundary. Used for
+    /// smaller answer models with a slower, shorter context.
+    pub fn limit_to(&mut self, max_chars: usize) {
+        let mut used = 0usize;
+        let mut kept = Vec::with_capacity(self.sections.len());
+        for mut section in std::mem::take(&mut self.sections) {
+            if used >= max_chars {
+                break;
+            }
+            let room = max_chars - used;
+            if section.content.len() > room {
+                section.content = safe_truncate(&section.content, room).to_string();
+                if section.content.is_empty() {
+                    break; // no room for even one character of this section
+                }
+            }
+            used += section.content.len();
+            kept.push(section);
+        }
+        self.sections = kept;
+        self.total_chars = used;
+    }
+}
+
 /// Format fetched content into a string for the LLM prompt.
 pub fn format_for_prompt(fetched: &FetchedContent) -> String {
     let mut parts = Vec::new();
@@ -372,11 +398,10 @@ fn fetch_list_extract(
                 NodeType::Table | NodeType::TableRow | NodeType::ListItem
             ) {
                 // Find the parent section rather than individual items
-                if let Some(parent_id) = find_parent_section_id_with_map(tree, id, &parent_map) {
-                    if !list_nodes.contains(&parent_id) {
+                if let Some(parent_id) = find_parent_section_id_with_map(tree, id, &parent_map)
+                    && !list_nodes.contains(&parent_id) {
                         list_nodes.push(parent_id);
                     }
-                }
             }
         }
 
@@ -484,8 +509,8 @@ fn build_parent_map(tree: &DocumentTree) -> HashMap<String, String> {
 fn find_section_title_with_map(tree: &DocumentTree, node_id: &str, parent_map: &HashMap<String, String>) -> String {
     let mut current = node_id.to_string();
     loop {
-        if let Some(node) = tree.get_node(&current) {
-            if matches!(node.node_type, NodeType::Section | NodeType::Heading | NodeType::Root) {
+        if let Some(node) = tree.get_node(&current)
+            && matches!(node.node_type, NodeType::Section | NodeType::Heading | NodeType::Root) {
                 let title = if node.content.len() > 80 {
                     format!("{}...", safe_truncate(&node.content, 80))
                 } else {
@@ -493,7 +518,6 @@ fn find_section_title_with_map(tree: &DocumentTree, node_id: &str, parent_map: &
                 };
                 return title;
             }
-        }
         match parent_map.get(&current) {
             Some(parent_id) => current = parent_id.clone(),
             None => break,
@@ -518,11 +542,10 @@ fn find_table_header_with_map(tree: &DocumentTree, node_id: &str, parent_map: &H
         loop {
             match parent_map.get(&current) {
                 Some(pid) => {
-                    if let Some(p) = tree.get_node(pid) {
-                        if matches!(p.node_type, NodeType::Table) {
+                    if let Some(p) = tree.get_node(pid)
+                        && matches!(p.node_type, NodeType::Table) {
                             break Some(pid.clone());
                         }
-                    }
                     current = pid.clone();
                 }
                 None => break None,
@@ -533,14 +556,13 @@ fn find_table_header_with_map(tree: &DocumentTree, node_id: &str, parent_map: &H
     let table_id = table_id?;
     let table = tree.get_node(&table_id)?;
 
-    if let Some(cols) = table.metadata.get("columns") {
-        if let Some(arr) = cols.as_array() {
+    if let Some(cols) = table.metadata.get("columns")
+        && let Some(arr) = cols.as_array() {
             let names: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
             if !names.is_empty() {
                 return Some(names.join(" | "));
             }
         }
-    }
 
     let children = tree.get_children(&table_id);
     for child in &children {
@@ -556,17 +578,12 @@ fn find_table_header_with_map(tree: &DocumentTree, node_id: &str, parent_map: &H
 fn find_parent_section_id_with_map(tree: &DocumentTree, node_id: &str, parent_map: &HashMap<String, String>) -> Option<String> {
     let mut current = node_id.to_string();
     loop {
-        match parent_map.get(&current) {
-            Some(parent_id) => {
-                if let Some(parent) = tree.get_node(parent_id) {
-                    if matches!(parent.node_type, NodeType::Section | NodeType::Root) {
-                        return Some(parent_id.clone());
-                    }
-                }
-                current = parent_id.clone();
+        let parent_id = parent_map.get(&current)?;
+        if let Some(parent) = tree.get_node(parent_id)
+            && matches!(parent.node_type, NodeType::Section | NodeType::Root) {
+                return Some(parent_id.clone());
             }
-            None => return None,
-        }
+        current = parent_id.clone();
     }
 }
 
@@ -704,6 +721,29 @@ mod tests {
             "Total chars {} should be near budget {}",
             result.total_chars, CONTENT_BUDGET
         );
+    }
+
+    #[test]
+    fn limit_to_keeps_leading_sections_within_budget() {
+        let section = |t: &str, n: usize| FetchedSection {
+            doc_name: "d".to_string(),
+            section_title: t.to_string(),
+            content: "é".repeat(n), // 2 bytes per char
+            node_ids: vec![],
+        };
+        let mut fetched = FetchedContent {
+            sections: vec![section("a", 10), section("b", 10), section("c", 10)],
+            fetch_steps: vec![],
+            total_chars: 60,
+        };
+        fetched.limit_to(31);
+        let titles: Vec<&str> = fetched.sections.iter().map(|s| s.section_title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b"]);
+        assert_eq!(fetched.sections[1].content.len(), 10); // 11 bytes of room, cut to a char boundary
+        assert_eq!(fetched.total_chars, 30);
+
+        fetched.limit_to(1_000);
+        assert_eq!(fetched.sections.len(), 2);
     }
 
     #[test]

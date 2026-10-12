@@ -1,40 +1,54 @@
+use std::sync::atomic::AtomicBool;
+
 use serde::Serialize;
 
 use crate::llm::local;
 
 /// Result of a single local-model enrichment step.
-/// Tokens are always 0 — the local sidecar has no token counting.
 #[derive(Debug, Clone)]
 pub struct EnrichmentResult {
     pub text: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub latency_ms: u64,
+}
+
+/// Run one enrichment prompt on the local SLM. Stops early if `cancel` is set.
+fn enrich(system: &str, query: &str, max_tokens: u32, cancel: &AtomicBool) -> Result<EnrichmentResult, String> {
+    let start = std::time::Instant::now();
+    let generation = local::generate(system, query, max_tokens, Some(cancel))?;
+    if generation.text.is_empty() {
+        return Err("Local model returned no text".to_string());
+    }
+    Ok(EnrichmentResult {
+        text: generation.text,
+        input_tokens: generation.prompt_tokens,
+        output_tokens: generation.output_tokens,
+        latency_ms: start.elapsed().as_millis() as u64,
+    })
 }
 
 /// Rewrite the user query into a clearer, search-optimized form using the local model.
-/// Returns Err if the local sidecar is not running (non-fatal — pipeline continues).
-pub fn rewrite_query(query: &str) -> Result<EnrichmentResult, String> {
+/// Returns Err if no local model is loaded (non-fatal — pipeline continues).
+pub fn rewrite_query(query: &str, cancel: &AtomicBool) -> Result<EnrichmentResult, String> {
     let system = "Rewrite the query into concise search terms. Expand single words like 'summarize' into a full question. Output ONLY the rewritten query.";
-    let text = local::chat_inference(system, query, 80)?;
-    Ok(EnrichmentResult { text: text.trim().to_string(), input_tokens: 0, output_tokens: 0 })
+    enrich(system, query, 80, cancel)
 }
 
 /// Generate a hypothetical document passage that would answer the query (HyDE technique).
 /// The generated passage is used to extract richer search terms that match document language.
-/// Returns Err if the local sidecar is not running (non-fatal — pipeline continues).
-pub fn generate_hyde(query: &str) -> Result<EnrichmentResult, String> {
+/// Returns Err if no local model is loaded (non-fatal — pipeline continues).
+pub fn generate_hyde(query: &str, cancel: &AtomicBool) -> Result<EnrichmentResult, String> {
     let system = "Write a short factual paragraph (2-3 sentences) a document would contain to answer this query. Use specific terminology. Output ONLY the paragraph.";
-    let text = local::chat_inference(system, query, 150)?;
-    Ok(EnrichmentResult { text: text.trim().to_string(), input_tokens: 0, output_tokens: 0 })
+    enrich(system, query, 150, cancel)
 }
 
 /// Generate a broader, more general version of the query (StepBack prompting technique).
 /// The broader question helps retrieve contextual information the specific query might miss.
-/// Returns Err if the local sidecar is not running (non-fatal — pipeline continues).
-pub fn stepback_query(query: &str) -> Result<EnrichmentResult, String> {
+/// Returns Err if no local model is loaded (non-fatal — pipeline continues).
+pub fn stepback_query(query: &str, cancel: &AtomicBool) -> Result<EnrichmentResult, String> {
     let system = "Generate a single broader question that provides background context for this query. Output ONLY the broader question.";
-    let text = local::chat_inference(system, query, 80)?;
-    Ok(EnrichmentResult { text: text.trim().to_string(), input_tokens: 0, output_tokens: 0 })
+    enrich(system, query, 80, cancel)
 }
 
 /// Extract search terms from arbitrary text. Public wrapper used by the enrichment pipeline

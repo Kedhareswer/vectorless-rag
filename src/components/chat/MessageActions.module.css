@@ -1,0 +1,32 @@
+.actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity var(--transition-normal);
+}
+
+/* Shown on hover/focus of the answer, always shown for keyboard users. */
+:global(.answer-row):hover .actions,
+.actions:focus-within {
+  opacity: 1;
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.action:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}

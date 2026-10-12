@@ -6,6 +6,9 @@ import {
   type ProviderConfig as TauriProviderConfig,
 } from '../lib/tauri';
 
+/** Provider name of the offline model running on this computer. */
+export const LOCAL_PROVIDER = 'local';
+
 export interface ProviderConfig {
   id: string;
   name: string;      // "ollama" | "groq" | "google" | "openrouter" | "agentrouter"
@@ -43,7 +46,6 @@ function toTauri(p: ProviderConfig): TauriProviderConfig {
 interface SettingsState {
   providers: ProviderConfig[];
   activeProviderId: string | null;
-  maxExplorationSteps: number;
   isLoading: boolean;
   error: string | null;
 
@@ -52,7 +54,12 @@ interface SettingsState {
   updateProvider: (id: string, updates: Partial<ProviderConfig>) => void;
   removeProvider: (id: string) => void;
   setActiveProvider: (id: string | null) => void;
-  setMaxSteps: (steps: number) => void;
+  /** Make a configured provider the active one and persist the change. */
+  activateProvider: (id: string) => Promise<void>;
+  /** Answer with the offline local model: add the Local provider if needed and activate it. */
+  enableLocalProvider: () => Promise<void>;
+  /** Answer with a model from a local server (Ollama / LM Studio): reuse or add that provider, set the model, activate. */
+  selectServerModel: (provider: string, model: string, baseUrl: string) => Promise<void>;
   loadProviders: () => Promise<void>;
   saveProviderToBackend: (provider: ProviderConfig) => Promise<void>;
   deleteProviderFromBackend: (id: string) => Promise<void>;
@@ -62,7 +69,6 @@ interface SettingsState {
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   providers: [],
   activeProviderId: null,
-  maxExplorationSteps: 10,
   isLoading: false,
   error: null,
 
@@ -102,9 +108,6 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }));
   },
 
-  setMaxSteps: (steps: number) => {
-    set({ maxExplorationSteps: steps });
-  },
 
   loadProviders: async () => {
     set({ isLoading: true, error: null });
@@ -119,6 +122,44 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
+  activateProvider: async (id: string) => {
+    const changed = get()
+      .providers.filter((p) => p.isActive !== (p.id === id))
+      .map((p) => ({ ...p, isActive: p.id === id }));
+    if (changed.length === 0) return;
+    get().setActiveProvider(id);
+    try {
+      for (const p of changed) await saveProviderIPC(toTauri(p));
+    } catch (err) {
+      console.warn('Failed to switch provider:', err);
+      set({ error: String(err) });
+    }
+  },
+  enableLocalProvider: async () => {
+    const existing = get().providers.find((p) => p.name === LOCAL_PROVIDER);
+    if (existing) {
+      await get().activateProvider(existing.id);
+      return;
+    }
+    const local: ProviderConfig = {
+      id: `local-${Date.now()}`,
+      name: LOCAL_PROVIDER,
+      apiKey: '',
+      baseUrl: '',
+      model: 'on-device',
+      isActive: false,
+    };
+    await get().saveProviderToBackend(local);
+    if (!get().error) await get().activateProvider(local.id);
+  },
+  selectServerModel: async (provider: string, model: string, baseUrl: string) => {
+    const existing = get().providers.find((p) => p.name === provider);
+    const config: ProviderConfig = existing
+      ? { ...existing, model, baseUrl: existing.baseUrl || baseUrl }
+      : { id: `${provider}-${Date.now()}`, name: provider, apiKey: '', baseUrl, model, isActive: false };
+    await get().saveProviderToBackend(config);
+    if (!get().error) await get().activateProvider(config.id);
+  },
   saveProviderToBackend: async (provider: ProviderConfig) => {
     set({ error: null });
     try {

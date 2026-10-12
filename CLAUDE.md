@@ -44,7 +44,7 @@ Phase 1  Fast heuristic preprocess (sync, ~0ms)
 
 Phase 2  Cancel check
 
-Phase 3  LLM-powered query enrichment (3 parallel LLM calls via candle SLM)
+Phase 3  Local-SLM query enrichment (3 sequential calls via candle, in-process)
          3a. Query Rewrite  — search-optimized reformulation
          3b. HyDE           — hypothetical answer passage, extract terms
          3c. StepBack       — broader question, extract terms
@@ -73,7 +73,9 @@ Phase 8  Save full trace (preprocessing + fetch + LLM steps)
 
 **Critical pipeline rules:**
 - LLM NEVER gets tools. `provider.chat_stream(messages, None, token_tx)` — tools always `None`.
-- All 4 LLM calls (3 preprocessing + 1 final) use the same provider/model.
+- Enrichment runs on the local SLM (free, offline) and only when a model is loaded; the final answer uses the selected provider/model — which may itself be the local SLM (`local` provider, see below).
+- With the `local` provider, content is cut to 12,000 chars (`FetchedContent::limit_to`) and history to 2,000 tokens, and cost is 0.
+- Each SLM generation is capped at 12s (partial text kept) and stops when the user cancels.
 - Preprocessing errors are non-fatal — step marked "Skipped", pipeline continues.
 - Content budget: **40,000 chars** per query (`CONTENT_BUDGET` in `deterministic.rs`).
 - Total UI steps: 3 preprocessing + N fetch steps + 1 `llm_call`.
@@ -91,13 +93,13 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 
 ## Tech Stack
 - **Desktop shell**: Tauri v2 (Rust backend + WebView frontend)
-- **Frontend**: React 19 + TypeScript + Vite
-- **Backend**: Rust (Tokio async runtime)
+- **Frontend**: React 19 + TypeScript 7 + Vite 8 (Vitest 5, Node 24 LTS in CI; Node ≥22.22.2 locally)
+- **Backend**: Rust, edition 2024 (Tokio async runtime)
 - **Database**: SQLite via `rusqlite` (document trees, traces, settings) — schema at V3
 - **Styling**: CSS custom properties + CSS modules, Inter font, JetBrains Mono for code
 - **State management**: Zustand stores (chat, documents, settings, theme, localModel)
 
-## LLM Providers (10 total, all real)
+## LLM Providers (11 total, all real)
 - **Groq** — Llama, Mixtral, Gemma (fast inference)
 - **Google AI Studio** — Gemini 2.5 Pro/Flash (vision capable)
 - **OpenRouter** — Claude, GPT, Llama, Mistral, DeepSeek, etc.
@@ -107,7 +109,10 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **DeepSeek** — DeepSeek Chat, DeepSeek Reasoner
 - **xAI / Grok** — Grok 3, Grok 3 Mini
 - **Qwen** — Qwen Max, Qwen Plus, Qwen Turbo
-- **Ollama** — Local models; **download works, inference is a stub**
+- **Ollama** — Any model served by a local Ollama; NDJSON token streaming, 16k context requested
+- **LM Studio** — any model loaded in a local LM Studio server (`http://localhost:1234/v1`), OpenAI-compatible, no API key (`OpenAICompatProvider::new_local`)
+- **Already-installed models** — `llm/local_servers.rs` probes Ollama (:11434) and LM Studio (:1234) in parallel (1.5 s timeout, no proxy) via `detect_local_models`; the frontend (`stores/localServers.ts`) offers them in the setup checklist, the composer model picker ("Installed on this computer") and Settings. `selectServerModel` in `stores/settings.ts` creates/reuses a keyless provider and activates it
+- **Local (offline)** — `llm/local_provider.rs`: answers with the in-process SLM (default LFM2.5-1.2B-Instruct), streamed, no API key, not wrapped in RetryProvider
 - All wrapped with `RetryProvider` for automatic retry on transient errors.
 - Unified `LLMProvider` trait: `chat()` + `chat_stream()` + `capabilities()`
 
@@ -119,7 +124,7 @@ Every document is parsed into a uniform tree:
 Node { id, node_type, content, metadata, children, relations }
 ```
 - Type-specific parsers in `document/parser.rs` output into this same schema
-- **PDF parser**: LiteParse (optional, layout-aware) → fallback to pdf-extract. 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
+- **PDF parser**: native LiteParse crate (PDFium; layout blocks → Section/Paragraph/ListItem/Table/CodeBlock with page numbers) → fallback to pdf-extract when PDFium is missing or a page has no text (no OCR compiled in). The pdf-extract fallback uses 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
 - **Image extraction**: lopdf extracts embedded JPEG/PNG/raw images; positioned as ImageNode in tree (no visual analysis)
 - Metadata fields: `summary`, `entities`, `topics`, `page_number`, `word_count`
 
@@ -161,46 +166,63 @@ Intent → fetch strategy:
 - `StepRecord`: one per pipeline step
 - Cost via `estimate_cost(model_id, input_tokens, output_tokens)` in `chat_handler.rs`
 
+### Dictation (offline Whisper)
+- Mic button (`chat/DictationButton.tsx`) records via `lib/audio.ts` (Web Audio → 16 kHz mono f32), store `stores/dictation.ts`
+- `transcribe_audio` → `llm/dictation.rs`: candle Whisper, greedy English decode, 30 s windows, non-speech windows dropped, 5 min cap
+- Models download on first use to `<app-data>/models/dictation/<id>/`: Whisper tiny.en Q8 (~42 MB, default) or base.en (~290 MB)
+- Not part of the query pipeline: it only fills the chat input
+
 ## Known Limitations
-- **SLM inference quality**: Qwen2.5 0.5B is tiny — summaries and entity extraction are approximate. Works well for enrichment terms, not for user-facing answers.
+- **Local model**: ONE download does all local work (enrichment, metadata, and answers via the `local` provider): Liquid LFM2.5-1.2B-Instruct QAD Q4_0 (~700 MB; Liquid's recommended successor to the deprecated LFM2-1.2B-RAG). LFM2.5-230M (~150 MB) is offered for low-memory PCs — enrichment only, too small for reliable answers. Local answers are slower (CPU) and simpler than large cloud models.
 - **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
-- **LiteParse coupling**: LiteParse JSON format may change between versions — parser handles gracefully by falling back to Rust parser.
+- **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. Scanned PDFs need OCR, which is not compiled in (tesseract / oar-ocr features are heavy).
+
+- **Dictation platforms**: release builds target Windows (WebView2 asks for mic permission). macOS would need `NSMicrophoneUsageDescription`; Linux WebKitGTK may not expose `getUserMedia`.
 
 ## UI Design
 
 ### Layout: TopBar + slide-over panels
 ```
-┌─────────────────────────────────────────────────────┐
-│ TopBar: ConversationSwitcher | icon buttons (docs,  │
-│         trace, settings)                            │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│              Main Chat Area                         │
-│           + ThinkingBlocks (steps visible)           │
-│                                                     │
-│   ┌────────────────────┐                            │
-│   │ SlidePanel overlay │  (DocsPanel, TracePanel,   │
-│   │   (from right)     │   SettingsModal)           │
-│   └────────────────────┘                            │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ [Chat title ▾] [✎ new]          [Documents n] [Trace] | [⚙]  │
+├──────────────────────────────────────────────────────────────┤
+│   Empty chat: setup checklist → starter questions            │
+│   Question → ProcessSummary (steps, folds when done) → answer│
+│   ┌ composer ───────────────────────────────────────────┐    │
+│   │ [doc chip] [+ Add]                 [model picker ▾] │    │
+│   │ Ask about your documents…                [mic] [➤]  │    │
+│   └─────────────────────────────────────────────────────┘    │
+│                          SlidePanel (Docs / Trace) from right │
+└──────────────────────────────────────────────────────────────┘
 ```
-- ConversationSwitcher: dropdown in TopBar (replaces sidebar chats tab)
-- DocsPanel: slide-over panel showing per-conversation documents
-- TracePanel: slide-over panel with trace/cost details
-- SettingsModal: provider configuration
-- ThinkingBlock shows each pipeline step with icon, label, output preview, token badge, latency badge
+- Chat title is the ConversationSwitcher trigger (search, ↑/↓/Enter, rename, delete with confirm)
+- Launch resumes the last chat (`resumeLastConversation`); `startNewChat` reuses an empty chat; untitled chats are named after the first question
+- Add documents ONLY via `hooks/useAddDocument` (ingest → attach, creating a chat if none is open)
+- Composer ModelPicker switches the active provider (`activateProvider` persists both rows)
+- SettingsModal: two-pane, sections from `SETTINGS_SECTIONS` (Providers, Local AI, Appearance, Data, Help); model is free text with suggestions
+- Answers have a Copy action (`MessageActions`)
 
-### ThinkingBlock Step Labels
+### Onboarding & guides (`components/onboarding/`, store `stores/guides.ts`)
+- First run (`onboarding_done` setting unset): `WelcomeTour` — 3 slides: what TGG does, why a model is needed (answer writer required, LFM2.5 search helper optional), the three ways to answer. It never forces a download.
+- How-to is shown only when needed: `AddModelDialog` opens on send without a provider, from the checklist ("Add a model"), the composer ModelPicker, and Settings → Providers / Help. Each option (`installed` / `offline` / `cloud`, registry `lib/modelGuides.ts`) has steps, a looping screen recording and the action itself (pick a detected Ollama/LM Studio model, download the offline model, or paste a cloud API key).
+- Recordings: `src/assets/guides/*.webm` (in-app clips) and `docs/media/onboarding.mp4` (full walkthrough), made from the real UI by `npm run guides:record` (`scripts/guides/record.mjs` + stand-in backend `mock.js`; needs `npm run dev`, `npm i --no-save playwright`, ffmpeg). Re-record after changing these screens.
+
+### Pipeline step display
+Step labels/icons live in ONE registry: `src/lib/pipelineSteps.ts` (`PIPELINE_STEPS`, `getStepMeta`). Used by ThinkingBlock (chat) and TraceView. A new backend step = one entry there.
+
 | tool key | label | icon |
 |---|---|---|
-| `query_rewrite` | Rewriting query | PenLine |
+| `query_rewrite` | Rewrote query | PenLine |
 | `hyde` | Hypothetical answer (HyDE) | Sparkles |
-| `stepback` | Broadening question (StepBack) | ArrowUpRight |
-| `tree_overview` | Reading structure | FileText |
-| `search` | Searching content | Search |
-| `expand` | Reading section | BookOpen |
-| `scan_lists` | Scanning lists & tables | List |
-| `llm_call` | Generating answer | Cpu |
+| `stepback` | Broadened question (StepBack) | ArrowUpRight |
+| `tree_overview` | Read structure | FileText |
+| `search` | Searched content | Search |
+| `expand` | Read section | BookOpen |
+| `scan_lists` | Scanned lists & tables | List |
+| `llm_call` | Generated answer | Cpu |
+
+### Keyboard shortcuts (`src/lib/shortcuts.ts` → `useShortcuts`)
+`mod` = ⌘ on macOS, Ctrl elsewhere: mod+N new chat · mod+K switch chat · mod+D documents · mod+J trace · mod+, settings · `/` focus input. Tooltips get hints from the same registry (`withShortcut`).
 
 ### Color Tokens
 ```
@@ -232,7 +254,7 @@ src-tauri/src/
     image.rs                — PDF/DOCX image extraction (lopdf + zip)
     cache.rs                — LRU tree cache
     metadata.rs             — SLM + heuristic entity/topic/summary extraction, cross-doc relations
-    liteparse.rs            — optional LiteParse integration (runtime npx detection)
+    liteparse.rs            — native LiteParse (PDFium) parsing → document tree
 
   agent/
     query.rs                — heuristic preprocess + rewrite_query/generate_hyde/stepback_query
@@ -243,8 +265,11 @@ src-tauri/src/
   llm/
     provider.rs             — LLMProvider trait, Message, LLMResponse, ProviderConfig
     retry.rs                — RetryProvider (exponential backoff)
-    slm.rs                  — candle-based in-process GGUF inference (Qwen2.5)
+    slm.rs                  — candle in-process GGUF inference (lfm2/qwen2/llama arch; weights loaded once; streaming)
+    local_provider.rs       — `local` answer provider over slm.rs (offline answers)
+    local_servers.rs        — detects models already installed in Ollama / LM Studio
     local.rs                — model download/management, delegates inference to slm.rs
+    dictation.rs            — offline Whisper speech-to-text (model catalog, download, transcribe)
     anthropic.rs            — Anthropic (real SSE streaming)
     openai_compat.rs        — OpenAI, DeepSeek, xAI, Qwen, AgentRouter
     groq.rs, google.rs, openrouter.rs
@@ -260,7 +285,18 @@ src/
     settings.ts             — provider configs, active provider
     theme.ts                — light/dark theme management
     localModel.ts           — local model download state
+    localServers.ts         — detected Ollama / LM Studio servers and their models
+    guides.ts               — welcome tour / add-model dialog visibility
+    dictation.ts            — dictation model status, recording/transcribing phase
   lib/tauri.ts              — typed invoke wrappers for all Tauri commands
+  lib/audio.ts              — mic recording + downsampling to 16 kHz
+  lib/pipelineSteps.ts      — step label/icon registry
+  lib/shortcuts.ts          — keyboard shortcut registry
+  lib/format.ts             — latency/cost/count formatting
+  lib/providers.ts          — provider display names (e.g. "Local (offline)")
+  lib/providerPresets.ts    — provider presets + suggested model IDs (Settings and AddModelDialog)
+  lib/modelGuides.ts        — add-model guide registry (steps, recordings, cloud key pages)
+  hooks/useShortcuts.ts, hooks/useAddDocument.ts
   components/
     common/TopBar.tsx         — top navigation bar with ConversationSwitcher + icon buttons
     common/ConversationSwitcher.tsx — conversation dropdown (replaces sidebar chats tab)
@@ -268,11 +304,18 @@ src/
     common/IconButton.tsx     — shared icon button component
     common/ModelDownloadDialog.tsx
     chat/ChatPanel.tsx        — message input, handleSend, event handler, ThinkingBlock list
-    chat/ThinkingBlock.tsx    — renders one pipeline step
+    chat/ProcessSummary.tsx   — collapsible group of pipeline steps under a question
+    chat/ThinkingBlock.tsx    — renders one pipeline step (labels from lib/pipelineSteps.ts)
+    chat/ChatEmptyState.tsx   — setup checklist / starter questions
+    chat/ModelPicker.tsx      — composer provider switcher
+    chat/MessageActions.tsx   — copy (and future) answer actions
+    chat/DictationButton.tsx  — mic button + first-use model download prompt
     preview/DocsPanel.tsx     — per-conversation document list (slide-over)
     preview/TracePanel.tsx    — trace/cost panel (slide-over)
     preview/TreeView.tsx, CanvasView.tsx, TraceView.tsx, RelationsView.tsx
-    settings/SettingsModal.tsx — provider configuration modal
+    settings/SettingsModal.tsx — tabbed settings (Providers, Local AI, Appearance, Data)
+    settings/LocalAISettings.tsx — enrichment + dictation model management
+    onboarding/WelcomeTour.tsx, AddModelDialog.tsx, GuideVideo.tsx — first-run tour + add-model guide
 ```
 
 ## DB Schema (V3 — current)
@@ -329,7 +372,7 @@ providers (id, name, api_key_encrypted, base_url, model, is_active)
 1. Add async function in `agent/query.rs` following `rewrite_query()` pattern (returns `EnrichmentResult`)
 2. Export in `agent/mod.rs`
 3. Add step block in `run_agent_chat()` with: StepStart → LLM call → StepComplete → `trace_steps.push`
-4. Add step type → label/icon mapping in `ThinkingBlock.tsx`
+4. Add the tool key → label/icon entry in `src/lib/pipelineSteps.ts`
 5. Increment `step_counter` before each StepStart
 
 ### Security
@@ -352,6 +395,6 @@ Full roadmap: `.planning/roadmap/`
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) — 3 jobs:
-- **Rust**: clippy + `cargo test --lib`
-- **Frontend**: `tsc --noEmit` + `vitest run` + `vite build`
-- **Release**: Windows MSI/EXE via git tags (auto-versioning)
+- **Rust**: `cargo clippy --all-targets -- -D warnings` + `cargo test --lib`
+- **Frontend** (Node 24): `tsc --noEmit` + `vitest run` + `vite build` + `npm audit --omit=dev --audit-level=high`
+- **Release** (push to main only, the only job with write permission): Windows MSI/EXE via git tags (auto-versioning)

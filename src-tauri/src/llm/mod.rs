@@ -1,7 +1,10 @@
 pub mod provider;
 pub mod retry;
 pub mod local;
+pub mod local_provider;
+pub mod local_servers;
 pub mod slm;
+pub mod dictation;
 pub mod groq;
 pub mod google;
 pub mod openrouter;
@@ -11,6 +14,7 @@ pub mod anthropic;
 pub mod openai_compat;
 
 pub use provider::{LLMProvider, LLMResponse, LLMError, Message, Tool, ToolCall, ProviderCapabilities, ProviderConfig};
+pub use local_provider::LocalProvider;
 pub use ollama::OllamaProvider;
 pub use groq::GroqProvider;
 pub use google::GoogleProvider;
