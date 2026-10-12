@@ -3,6 +3,7 @@ import { Check, ChevronDown, Server, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import { useSettingsStore } from '../../stores/settings';
 import { providerDisplayName, providerModelLabel } from '../../lib/providers';
+import { useLocalServersStore } from '../../stores/localServers';
 import styles from './ModelPicker.module.css';
 
 interface ModelPickerProps {
@@ -14,6 +15,8 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
   const providers = useSettingsStore((s) => s.providers);
   const activeProviderId = useSettingsStore((s) => s.activeProviderId);
   const activateProvider = useSettingsStore((s) => s.activateProvider);
+  const selectServerModel = useSettingsStore((s) => s.selectServerModel);
+  const servers = useLocalServersStore((s) => s.servers);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -28,6 +31,13 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
 
   const active = providers.find((p) => p.id === activeProviderId);
   if (!active) return null;
+
+  // Installed models on local servers that aren't already a configured choice.
+  const serverModels = servers.flatMap((server) =>
+    server.models
+      .filter((m) => !providers.some((p) => p.name === server.provider && p.model === m))
+      .map((model) => ({ server, model })),
+  );
 
   return (
     <div className={styles.wrap} ref={ref} onKeyDown={(e) => e.key === 'Escape' && setOpen(false)}>
@@ -66,6 +76,29 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
               {p.id === activeProviderId && <Check size={13} className={styles.check} />}
             </button>
           ))}
+          {serverModels.length > 0 && (
+            <>
+              <div className={styles.menuLabel}>Installed on this computer</div>
+              {serverModels.slice(0, 8).map(({ server, model }) => (
+                <button
+                  key={`${server.provider}:${model}`}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={false}
+                  className={styles.item}
+                  onClick={() => {
+                    void selectServerModel(server.provider, model, server.base_url);
+                    setOpen(false);
+                  }}
+                >
+                  <span className={styles.itemText}>
+                    <span className={styles.itemModel}>{model}</span>
+                    <span className={styles.itemProvider}>{server.label}</span>
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
           <button
             type="button"
             role="menuitem"

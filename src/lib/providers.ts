@@ -2,6 +2,7 @@ import { LOCAL_PROVIDER } from '../stores/settings';
 
 const DISPLAY_NAMES: Record<string, string> = {
   [LOCAL_PROVIDER]: 'Local (offline)',
+  lmstudio: 'LM Studio',
   openai: 'OpenAI',
   'openai-compat': 'OpenAI compatible',
   xai: 'xAI',

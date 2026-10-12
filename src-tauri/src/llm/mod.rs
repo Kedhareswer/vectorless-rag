@@ -2,6 +2,7 @@ pub mod provider;
 pub mod retry;
 pub mod local;
 pub mod local_provider;
+pub mod local_servers;
 pub mod slm;
 pub mod dictation;
 pub mod groq;

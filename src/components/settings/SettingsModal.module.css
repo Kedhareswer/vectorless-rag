@@ -709,3 +709,10 @@
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+.serverStatus {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--line-height-normal);
+  color: var(--text-secondary);
+}

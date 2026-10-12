@@ -496,6 +496,13 @@ pub fn delete_local_model(
     local::delete_local_model(&app_data, &db)
 }
 
+/// Model servers already running on this machine (Ollama, LM Studio) and
+/// their installed models.
+#[tauri::command]
+pub async fn detect_local_models() -> Vec<crate::llm::local_servers::LocalServer> {
+    crate::llm::local_servers::detect().await
+}
+
 // ── Dictation (offline Whisper) ──────────────────────────────────────
 
 #[tauri::command]

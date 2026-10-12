@@ -14,6 +14,7 @@ import { ModelPicker } from './ModelPicker';
 import { useAddDocument } from '../../hooks/useAddDocument';
 import { useLocalModelStore } from '../../stores/localModel';
 import { isLocalProvider } from '../../lib/providers';
+import { useLocalServersStore, firstUsableServer } from '../../stores/localServers';
 import { MessageActions } from './MessageActions';
 import { DictationButton } from './DictationButton';
 import styles from './ChatPanel.module.css';
@@ -53,6 +54,8 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
   const activeProvider = providers.find((p) => p.id === activeProviderId);
   const localModelDownloaded = useLocalModelStore((s) => s.status?.downloaded ?? false);
   const localModelMissing = isLocalProvider(activeProvider) && !localModelDownloaded;
+  const localServer = firstUsableServer(useLocalServersStore((s) => s.servers));
+  const selectServerModel = useSettingsStore((s) => s.selectServerModel);
 
   const streamingContentRef = useRef('');
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -220,6 +223,12 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
             <ChatEmptyState
               hasProvider={!noProvider && !localModelMissing}
               localModelMissing={localModelMissing}
+              localServer={localServer && { label: localServer.label, model: localServer.models[0] }}
+              onUseLocalServer={
+                localServer
+                  ? () => void selectServerModel(localServer.provider, localServer.models[0], localServer.base_url)
+                  : undefined
+              }
               onUseOffline={() => onSetupOffline?.()}
               docNames={convDocNames as string[]}
               isIngesting={isIngesting}

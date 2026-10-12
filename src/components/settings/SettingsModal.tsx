@@ -20,6 +20,7 @@ import { useThemeStore } from '../../stores/theme';
 import { ModelDownloadDialog } from '../common/ModelDownloadDialog';
 import { LocalAISettings } from './LocalAISettings';
 import { providerDisplayName } from '../../lib/providers';
+import { useLocalServersStore } from '../../stores/localServers';
 import { clearAppData } from '../../lib/tauri';
 import styles from './SettingsModal.module.css';
 
@@ -41,6 +42,7 @@ interface SettingsModalProps {
 
 type ProviderPreset =
   | 'local'
+  | 'lmstudio'
   | 'ollama'
   | 'groq'
   | 'google'
@@ -163,6 +165,12 @@ const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isAc
     baseUrl: '',
     model: '',
   },
+  lmstudio: {
+    name: 'lmstudio',
+    apiKey: '',
+    baseUrl: 'http://localhost:1234/v1',
+    model: '',
+  },
   local: {
     name: 'local',
     apiKey: '',
@@ -188,6 +196,12 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
   } = useSettingsStore();
 
   const { theme, setTheme } = useThemeStore();
+  const { servers, detecting, detect } = useLocalServersStore();
+
+  // Look for Ollama / LM Studio so installed models can be offered.
+  useEffect(() => {
+    void detect();
+  }, [detect]);
 
   // Local draft state for editing
   const [draftProviders, setDraftProviders] = useState<ProviderConfig[]>(() =>
@@ -447,6 +461,7 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                         <optgroup label="On this computer">
                           <option value="local">Local model (offline)</option>
                           <option value="ollama">Ollama</option>
+                          <option value="lmstudio">LM Studio</option>
                         </optgroup>
                         <optgroup label="Cloud — Direct">
                           <option value="anthropic">Anthropic (Claude)</option>
@@ -475,7 +490,7 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                       </p>
                     )}
 
-                    {provider.name !== 'ollama' && provider.name !== 'local' && (
+                    {!['ollama', 'lmstudio', 'local'].includes(provider.name) && (
                       <div className={clsx(styles.field, styles.fieldFull)}>
                         <label className={styles.fieldLabel}>API Key</label>
                         <input
@@ -519,11 +534,29 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                         spellCheck={false}
                       />
                       <datalist id={`models-${provider.id}`}>
-                        {(PROVIDER_MODELS[provider.name as ProviderPreset] ?? []).map((m) => (
+                        {[
+                          ...(servers.find((sv) => sv.provider === provider.name)?.models ?? []),
+                          ...(PROVIDER_MODELS[provider.name as ProviderPreset] ?? []),
+                        ].map((m) => (
                           <option key={m} value={m} />
                         ))}
                       </datalist>
                     </div>
+
+                    {(provider.name === 'ollama' || provider.name === 'lmstudio') && (
+                      <p className={clsx(styles.serverStatus, styles.fieldFull)} role="status">
+                        {(() => {
+                          const server = servers.find((sv) => sv.provider === provider.name);
+                          if (detecting && !server) return 'Looking for a running server…';
+                          if (!server) {
+                            return `Not detected at ${provider.baseUrl || PROVIDER_PRESETS[provider.name as ProviderPreset].baseUrl || 'the default address'} — start ${providerDisplayName(provider.name)}, then reopen Settings.`;
+                          }
+                          return server.models.length > 0
+                            ? `${server.label} is running · ${server.models.length} installed model${server.models.length === 1 ? '' : 's'} (pick one in the Model field)`
+                            : `${server.label} is running but has no models installed yet.`;
+                        })()}
+                      </p>
+                    )}
                     </>)}
 
                     <div className={clsx(styles.field, styles.fieldFull)}>

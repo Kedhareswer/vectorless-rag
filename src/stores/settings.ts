@@ -58,6 +58,8 @@ interface SettingsState {
   activateProvider: (id: string) => Promise<void>;
   /** Answer with the offline local model: add the Local provider if needed and activate it. */
   enableLocalProvider: () => Promise<void>;
+  /** Answer with a model from a local server (Ollama / LM Studio): reuse or add that provider, set the model, activate. */
+  selectServerModel: (provider: string, model: string, baseUrl: string) => Promise<void>;
   loadProviders: () => Promise<void>;
   saveProviderToBackend: (provider: ProviderConfig) => Promise<void>;
   deleteProviderFromBackend: (id: string) => Promise<void>;
@@ -149,6 +151,14 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     };
     await get().saveProviderToBackend(local);
     if (!get().error) await get().activateProvider(local.id);
+  },
+  selectServerModel: async (provider: string, model: string, baseUrl: string) => {
+    const existing = get().providers.find((p) => p.name === provider);
+    const config: ProviderConfig = existing
+      ? { ...existing, model, baseUrl: existing.baseUrl || baseUrl }
+      : { id: `${provider}-${Date.now()}`, name: provider, apiKey: '', baseUrl, model, isActive: false };
+    await get().saveProviderToBackend(config);
+    if (!get().error) await get().activateProvider(config.id);
   },
   saveProviderToBackend: async (provider: ProviderConfig) => {
     set({ error: null });

@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { ModelPicker } from './ModelPicker';
 import { useSettingsStore } from '../../stores/settings';
 import * as tauri from '../../lib/tauri';
+import { useLocalServersStore } from '../../stores/localServers';
 
 vi.mock('../../lib/tauri', () => ({
   getProviders: vi.fn().mockResolvedValue([]),
@@ -32,6 +33,18 @@ describe('ModelPicker', () => {
     const s = useSettingsStore.getState();
     expect(s.activeProviderId).toBe('g');
     expect(s.providers.find((p) => p.id === 'a')?.isActive).toBe(false);
+  });
+
+  it('lists models installed in local servers and switches to one', async () => {
+    useLocalServersStore.setState({
+      servers: [{ provider: 'ollama', label: 'Ollama', base_url: 'http://localhost:11434', models: ['qwen3:8b'] }],
+    });
+    render(<ModelPicker onOpenSettings={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /claude-sonnet-4-5/ }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /qwen3:8b/ }));
+    await vi.waitFor(() => expect(useSettingsStore.getState().providers.find((p) => p.name === 'ollama')?.isActive).toBe(true));
+    expect(tauri.saveProvider).toHaveBeenCalledWith(expect.objectContaining({ name: 'ollama', model: 'qwen3:8b', api_key: null }));
+    useLocalServersStore.setState({ servers: [] });
   });
 
   it('links to provider settings', () => {

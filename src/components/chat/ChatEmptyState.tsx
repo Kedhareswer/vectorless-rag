@@ -1,4 +1,4 @@
-import { Check, Cloud, FileText, HardDrive, LoaderCircle, MessageSquareText, Plus, Server } from 'lucide-react';
+import { Check, Cloud, Cpu, FileText, HardDrive, LoaderCircle, MessageSquareText, Plus, Server } from 'lucide-react';
 import clsx from 'clsx';
 import styles from './ChatEmptyState.module.css';
 
@@ -6,6 +6,9 @@ interface ChatEmptyStateProps {
   hasProvider: boolean;
   /** The Local (offline) provider is selected but its model isn't downloaded. */
   localModelMissing?: boolean;
+  /** A model server already on this machine (Ollama / LM Studio) with a model to use. */
+  localServer?: { label: string; model: string };
+  onUseLocalServer?: () => void;
   docNames: string[];
   isIngesting: boolean;
   onOpenSettings: () => void;
@@ -35,6 +38,8 @@ export function starterQuestions(docCount: number): string[] {
 export function ChatEmptyState({
   hasProvider,
   localModelMissing = false,
+  localServer,
+  onUseLocalServer,
   docNames,
   isIngesting,
   onOpenSettings,
@@ -78,11 +83,16 @@ export function ChatEmptyState({
       title: localModelMissing ? 'Download the offline model' : 'Choose how to answer',
       detail: localModelMissing
         ? 'One ~700 MB download, then everything runs on this computer.'
-        : 'Offline on this computer (one ~700 MB download, private and free), or a cloud provider like Anthropic or OpenAI for the strongest answers.',
+        : localServer
+          ? `${localServer.label} is running on this computer — answer with ${localServer.model}, no download needed. Or use the built-in offline model, or a cloud provider.`
+          : 'Offline on this computer (one ~700 MB download, private and free), or a cloud provider like Anthropic or OpenAI for the strongest answers.',
       actions: localModelMissing
         ? [{ label: 'Download', onClick: onUseOffline, icon: HardDrive }]
         : [
-            { label: 'Use offline model', onClick: onUseOffline, icon: HardDrive },
+            ...(localServer && onUseLocalServer
+              ? [{ label: `Use ${localServer.label} model`, onClick: onUseLocalServer, icon: Cpu }]
+              : []),
+            { label: localServer ? 'Built-in offline model' : 'Use offline model', onClick: onUseOffline, icon: HardDrive },
             { label: 'Cloud provider', onClick: onOpenSettings, icon: Cloud },
           ],
     },

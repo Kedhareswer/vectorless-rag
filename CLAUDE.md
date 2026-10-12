@@ -99,7 +99,7 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **Styling**: CSS custom properties + CSS modules, Inter font, JetBrains Mono for code
 - **State management**: Zustand stores (chat, documents, settings, theme, localModel)
 
-## LLM Providers (10 total, all real)
+## LLM Providers (11 total, all real)
 - **Groq** — Llama, Mixtral, Gemma (fast inference)
 - **Google AI Studio** — Gemini 2.5 Pro/Flash (vision capable)
 - **OpenRouter** — Claude, GPT, Llama, Mistral, DeepSeek, etc.
@@ -110,6 +110,8 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **xAI / Grok** — Grok 3, Grok 3 Mini
 - **Qwen** — Qwen Max, Qwen Plus, Qwen Turbo
 - **Ollama** — Any model served by a local Ollama; NDJSON token streaming, 16k context requested
+- **LM Studio** — any model loaded in a local LM Studio server (`http://localhost:1234/v1`), OpenAI-compatible, no API key (`OpenAICompatProvider::new_local`)
+- **Already-installed models** — `llm/local_servers.rs` probes Ollama (:11434) and LM Studio (:1234) in parallel (1.5 s timeout, no proxy) via `detect_local_models`; the frontend (`stores/localServers.ts`) offers them in the setup checklist, the composer model picker ("Installed on this computer") and Settings. `selectServerModel` in `stores/settings.ts` creates/reuses a keyless provider and activates it
 - **Local (offline)** — `llm/local_provider.rs`: answers with the in-process SLM (default LFM2.5-1.2B-Instruct), streamed, no API key, not wrapped in RetryProvider
 - All wrapped with `RetryProvider` for automatic retry on transient errors.
 - Unified `LLMProvider` trait: `chat()` + `chat_stream()` + `capabilities()`
@@ -260,6 +262,7 @@ src-tauri/src/
     retry.rs                — RetryProvider (exponential backoff)
     slm.rs                  — candle in-process GGUF inference (lfm2/qwen2/llama arch; weights loaded once; streaming)
     local_provider.rs       — `local` answer provider over slm.rs (offline answers)
+    local_servers.rs        — detects models already installed in Ollama / LM Studio
     local.rs                — model download/management, delegates inference to slm.rs
     dictation.rs            — offline Whisper speech-to-text (model catalog, download, transcribe)
     anthropic.rs            — Anthropic (real SSE streaming)
@@ -277,6 +280,7 @@ src/
     settings.ts             — provider configs, active provider
     theme.ts                — light/dark theme management
     localModel.ts           — local model download state
+    localServers.ts         — detected Ollama / LM Studio servers and their models
     dictation.ts            — dictation model status, recording/transcribing phase
   lib/tauri.ts              — typed invoke wrappers for all Tauri commands
   lib/audio.ts              — mic recording + downsampling to 16 kHz

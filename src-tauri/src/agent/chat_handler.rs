@@ -61,6 +61,9 @@ pub fn create_provider(config: ProviderConfig) -> Result<Box<dyn LLMProvider>, S
         "openai-compat" => Box::new(OpenAICompatProvider::new(
             config, "Custom", "",
         )),
+        "lmstudio" => Box::new(OpenAICompatProvider::new_local(
+            config, "LM Studio", crate::llm::local_servers::LMSTUDIO_URL,
+        )),
         _ => return Err(format!("Unknown provider: {}", config.name)),
     };
     // Wrap all providers with automatic retry on transient errors

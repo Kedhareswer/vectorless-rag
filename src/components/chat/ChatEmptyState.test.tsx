@@ -25,6 +25,16 @@ describe('ChatEmptyState', () => {
     expect(screen.getByRole('button', { name: /Add document/ })).toBeDisabled();
   });
 
+  it('offers a model the user already runs locally, without a download', () => {
+    const onUseLocalServer = vi.fn();
+    const p = props({ localServer: { label: 'Ollama', model: 'llama3.2:3b' }, onUseLocalServer });
+    render(<ChatEmptyState {...p} />);
+    expect(screen.getByText(/answer with llama3.2:3b, no download needed/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Use Ollama model' }));
+    expect(onUseLocalServer).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Built-in offline model' })).toBeInTheDocument();
+  });
+
   it('asks for the download when the offline provider has no model yet', () => {
     const p = props({ localModelMissing: true });
     render(<ChatEmptyState {...p} />);

@@ -13,6 +13,7 @@ import { SettingsModal } from './components/settings/SettingsModal';
 import { ModelDownloadDialog } from './components/common/ModelDownloadDialog';
 import { getSetting, setSetting, checkLocalModel } from './lib/tauri';
 import { useLocalModelStore } from './stores/localModel';
+import { useLocalServersStore } from './stores/localServers';
 import { useShortcuts } from './hooks/useShortcuts';
 import styles from './App.module.css';
 
@@ -38,6 +39,7 @@ function App() {
   const loadProviders = useSettingsStore((s) => s.loadProviders);
   const enableLocalProvider = useSettingsStore((s) => s.enableLocalProvider);
   const refreshLocalModel = useLocalModelStore((s) => s.refreshStatus);
+  const detectLocalServers = useLocalServersStore((s) => s.detect);
 
   const activeConv = conversations.find((c) => c.id === activeConversationId);
 
@@ -48,7 +50,9 @@ function App() {
     loadDocuments();
     loadProviders();
     refreshLocalModel();
-  }, [refreshLocalModel, initialize, loadConversations, resumeLastConversation, loadDocuments, loadProviders]);
+    // Models the user already has (Ollama / LM Studio) can answer without a download.
+    detectLocalServers();
+  }, [refreshLocalModel, detectLocalServers, initialize, loadConversations, resumeLastConversation, loadDocuments, loadProviders]);
 
   // Onboarding check
   useEffect(() => {

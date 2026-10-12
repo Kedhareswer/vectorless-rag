@@ -9,8 +9,8 @@ pub fn validate_provider(config: &ProviderConfig) -> Result<(), String> {
         return Err("Model name is required.".to_string());
     }
 
-    // Ollama and the in-process local model don't use API keys.
-    let needs_key = !matches!(config.name.to_lowercase().as_str(), "ollama" | "local");
+    // Local servers and the in-process local model don't use API keys.
+    let needs_key = !matches!(config.name.to_lowercase().as_str(), "ollama" | "lmstudio" | "local");
 
     if needs_key {
         if let Some(ref key) = config.api_key {
@@ -113,6 +113,12 @@ mod tests {
     fn empty_api_key_fails_for_non_ollama() {
         let config = make_config("openai", "gpt-4o", Some("  "), "");
         assert!(validate_provider(&config).is_err());
+    }
+
+    #[test]
+    fn lmstudio_without_api_key_passes() {
+        let config = make_config("lmstudio", "qwen2.5-7b-instruct", None, "");
+        assert!(validate_provider(&config).is_ok());
     }
 
     #[test]

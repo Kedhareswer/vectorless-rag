@@ -112,6 +112,7 @@ pub fn run() {
             commands::check_local_model,
             commands::download_local_model,
             commands::delete_local_model,
+            commands::detect_local_models,
             commands::get_dictation_options,
             commands::check_dictation_model,
             commands::download_dictation_model,

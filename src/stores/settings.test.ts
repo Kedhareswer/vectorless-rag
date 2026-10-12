@@ -268,6 +268,26 @@ describe('SettingsStore', () => {
     expect(useSettingsStore.getState().error).toBe('Error: Delete failed');
   });
 
+  // ── selectServerModel ──────────────────────────────────────────
+
+  it('selectServerModel adds a keyless provider for a detected server and activates it', async () => {
+    useSettingsStore.setState({ providers: [makeProvider('p1', 'anthropic', true)], activeProviderId: 'p1', error: null });
+    await useSettingsStore.getState().selectServerModel('ollama', 'qwen3:8b', 'http://localhost:11434');
+    const s = useSettingsStore.getState();
+    const ollama = s.providers.find((p) => p.name === 'ollama');
+    expect(ollama).toMatchObject({ model: 'qwen3:8b', apiKey: '', baseUrl: 'http://localhost:11434', isActive: true });
+    expect(s.activeProviderId).toBe(ollama?.id);
+  });
+
+  it('selectServerModel reuses an existing provider and switches its model', async () => {
+    const existing = { ...makeProvider('o1', 'ollama', false), model: 'llama3.2', baseUrl: 'http://10.0.0.5:11434' };
+    useSettingsStore.setState({ providers: [existing], activeProviderId: null, error: null });
+    await useSettingsStore.getState().selectServerModel('ollama', 'phi4', 'http://localhost:11434');
+    const s = useSettingsStore.getState();
+    expect(s.providers).toHaveLength(1);
+    expect(s.providers[0]).toMatchObject({ id: 'o1', model: 'phi4', baseUrl: 'http://10.0.0.5:11434', isActive: true });
+  });
+
   // ── enableLocalProvider ────────────────────────────────────────
 
   it('enableLocalProvider adds and activates the offline provider once', async () => {

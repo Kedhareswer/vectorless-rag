@@ -228,6 +228,16 @@ export const downloadLocalModel = (
 };
 export const deleteLocalModel = () => invoke<void>('delete_local_model');
 
+/** A model server already running on this machine (Ollama, LM Studio). */
+export interface LocalServer {
+  /** Provider name to configure: 'ollama' | 'lmstudio'. */
+  provider: string;
+  label: string;
+  base_url: string;
+  models: string[];
+}
+export const detectLocalModels = () => invoke<LocalServer[]>('detect_local_models');
+
 // Dictation (offline Whisper speech-to-text)
 export interface DictationModelOption {
   id: string;

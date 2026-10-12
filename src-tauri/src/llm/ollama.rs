@@ -16,10 +16,16 @@ impl OllamaProvider {
         if config.base_url.is_empty() {
             config.base_url = "http://localhost:11434".to_string();
         }
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
+        // A server on this machine must not be routed through a system proxy.
+        let is_local = ["://localhost", "://127.0.0.1", "://[::1]"]
+            .iter()
+            .any(|h| config.base_url.contains(h));
+        let client = if is_local {
+            reqwest::Client::builder().no_proxy().build().unwrap_or_else(|_| reqwest::Client::new())
+        } else {
+            reqwest::Client::new()
+        };
+        Self { config, client }
     }
 }
 
