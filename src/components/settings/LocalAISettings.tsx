@@ -37,10 +37,11 @@ export function LocalAISettings({ onManageEnrichmentModel }: LocalAISettingsProp
         <div className={styles.cardHeader}>
           <Cpu size={16} className={styles.cardIcon} />
           <div className={styles.cardText}>
-            <span className={styles.cardTitle}>Query enrichment model</span>
+            <span className={styles.cardTitle}>Offline model</span>
             <span className={styles.cardDesc}>
-              Rewrites questions and drafts search terms on your CPU before each answer, and
-              summarises document sections. Optional — without it, keyword search is used.
+              One model, running on this computer: it answers questions when the provider is
+              “Local (offline)”, improves search before every answer, and summarises document
+              sections. Nothing leaves your machine.
             </span>
           </div>
         </div>

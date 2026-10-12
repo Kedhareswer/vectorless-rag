@@ -267,6 +267,30 @@ describe('SettingsStore', () => {
 
     expect(useSettingsStore.getState().error).toBe('Error: Delete failed');
   });
+
+  // ── enableLocalProvider ────────────────────────────────────────
+
+  it('enableLocalProvider adds and activates the offline provider once', async () => {
+    useSettingsStore.setState({
+      providers: [makeProvider('p1', 'anthropic', true)],
+      activeProviderId: 'p1',
+      error: null,
+    });
+    await useSettingsStore.getState().enableLocalProvider();
+    let s = useSettingsStore.getState();
+    const local = s.providers.find((p) => p.name === 'local');
+    expect(local).toBeDefined();
+    expect(local?.apiKey).toBe('');
+    expect(s.activeProviderId).toBe(local?.id);
+    expect(s.providers.find((p) => p.id === 'p1')?.isActive).toBe(false);
+
+    // A second call reuses it rather than adding another.
+    await useSettingsStore.getState().activateProvider('p1');
+    await useSettingsStore.getState().enableLocalProvider();
+    s = useSettingsStore.getState();
+    expect(s.providers.filter((p) => p.name === 'local')).toHaveLength(1);
+    expect(s.activeProviderId).toBe(local?.id);
+  });
 });
 
 // ── Helpers ────────────────────────────────────────────────────────

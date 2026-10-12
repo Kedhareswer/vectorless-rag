@@ -19,6 +19,7 @@ import { useSettingsStore, type ProviderConfig } from '../../stores/settings';
 import { useThemeStore } from '../../stores/theme';
 import { ModelDownloadDialog } from '../common/ModelDownloadDialog';
 import { LocalAISettings } from './LocalAISettings';
+import { providerDisplayName } from '../../lib/providers';
 import { clearAppData } from '../../lib/tauri';
 import styles from './SettingsModal.module.css';
 
@@ -39,6 +40,7 @@ interface SettingsModalProps {
 }
 
 type ProviderPreset =
+  | 'local'
   | 'ollama'
   | 'groq'
   | 'google'
@@ -160,6 +162,12 @@ const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isAc
     apiKey: '',
     baseUrl: '',
     model: '',
+  },
+  local: {
+    name: 'local',
+    apiKey: '',
+    baseUrl: '',
+    model: 'on-device',
   },
 };
 
@@ -410,7 +418,7 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                 <div key={provider.id} className={styles.providerCard}>
                   <div className={styles.providerCardHeader}>
                     <span className={styles.providerCardName}>
-                      {provider.name.charAt(0).toUpperCase() + provider.name.slice(1)}
+                      {providerDisplayName(provider.name)}
                     </span>
                     <div className={styles.providerCardActions}>
                       <button
@@ -436,6 +444,10 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                           handlePresetChange(provider.id, e.target.value as ProviderPreset)
                         }
                       >
+                        <optgroup label="On this computer">
+                          <option value="local">Local model (offline)</option>
+                          <option value="ollama">Ollama</option>
+                        </optgroup>
                         <optgroup label="Cloud — Direct">
                           <option value="anthropic">Anthropic (Claude)</option>
                           <option value="openai">OpenAI</option>
@@ -449,16 +461,21 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                           <option value="openrouter">OpenRouter</option>
                           <option value="agentrouter">AgentRouter</option>
                         </optgroup>
-                        <optgroup label="Local">
-                          <option value="ollama">Ollama (Local)</option>
-                        </optgroup>
                         <optgroup label="Custom">
                           <option value="openai-compat">OpenAI Compatible</option>
                         </optgroup>
                       </select>
                     </div>
 
-                    {provider.name !== 'ollama' && (
+                    {provider.name === 'local' && (
+                      <p className={clsx(styles.sectionDesc, styles.fieldFull)}>
+                        Answers with the offline model from <strong>Local AI</strong> — no API key,
+                        nothing leaves this computer. Answers are slower and simpler than large
+                        cloud models.
+                      </p>
+                    )}
+
+                    {provider.name !== 'ollama' && provider.name !== 'local' && (
                       <div className={clsx(styles.field, styles.fieldFull)}>
                         <label className={styles.fieldLabel}>API Key</label>
                         <input
@@ -474,6 +491,7 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                       </div>
                     )}
 
+                    {provider.name !== 'local' && (<>
                     <div className={styles.field}>
                       <label className={styles.fieldLabel}>Base URL</label>
                       <input
@@ -506,6 +524,7 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                         ))}
                       </datalist>
                     </div>
+                    </>)}
 
                     <div className={clsx(styles.field, styles.fieldFull)}>
                       <div className={styles.toggleRow}>

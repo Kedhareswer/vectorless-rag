@@ -7,6 +7,7 @@ const props = (overrides = {}) => ({
   docNames: [] as string[],
   isIngesting: false,
   onOpenSettings: vi.fn(),
+  onUseOffline: vi.fn(),
   onAddDocument: vi.fn(),
   onFocusInput: vi.fn(),
   onAsk: vi.fn(),
@@ -14,18 +15,28 @@ const props = (overrides = {}) => ({
 });
 
 describe('ChatEmptyState', () => {
-  it('starts the checklist at the provider step and locks later steps', () => {
+  it('starts by choosing offline or cloud answers, and locks later steps', () => {
     const p = props();
     render(<ChatEmptyState {...p} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use offline model' }));
+    expect(p.onUseOffline).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cloud provider' }));
     expect(p.onOpenSettings).toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /Add document/ })).toBeDisabled();
+  });
+
+  it('asks for the download when the offline provider has no model yet', () => {
+    const p = props({ localModelMissing: true });
+    render(<ChatEmptyState {...p} />);
+    expect(screen.getByText('Download the offline model')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+    expect(p.onUseOffline).toHaveBeenCalled();
   });
 
   it('moves on to adding a document once a provider exists', () => {
     const p = props({ hasProvider: true });
     render(<ChatEmptyState {...p} />);
-    expect(screen.queryByRole('button', { name: 'Open settings' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Use offline model' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Add document/ }));
     expect(p.onAddDocument).toHaveBeenCalled();
   });

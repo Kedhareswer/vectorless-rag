@@ -12,6 +12,8 @@ import { ProcessSummary } from './ProcessSummary';
 import { ChatEmptyState } from './ChatEmptyState';
 import { ModelPicker } from './ModelPicker';
 import { useAddDocument } from '../../hooks/useAddDocument';
+import { useLocalModelStore } from '../../stores/localModel';
+import { isLocalProvider } from '../../lib/providers';
 import { MessageActions } from './MessageActions';
 import { DictationButton } from './DictationButton';
 import styles from './ChatPanel.module.css';
@@ -19,9 +21,11 @@ import styles from './ChatPanel.module.css';
 interface ChatPanelProps {
   onOpenSettings?: () => void;
   onOpenDocs?: () => void;
+  /** Switch answering to the offline model (and offer its download). */
+  onSetupOffline?: () => void;
 }
 
-export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
+export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -47,6 +51,8 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
   const { providers, activeProviderId } = useSettingsStore();
 
   const activeProvider = providers.find((p) => p.id === activeProviderId);
+  const localModelDownloaded = useLocalModelStore((s) => s.status?.downloaded ?? false);
+  const localModelMissing = isLocalProvider(activeProvider) && !localModelDownloaded;
 
   const streamingContentRef = useRef('');
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -118,7 +124,12 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
     const docIds = [...conversationDocIds];
 
     if (!activeProviderId || !activeProvider) {
-      setSendError('Connect a model provider in Settings first.');
+      setSendError('Choose how to answer first: the offline model or a cloud provider.');
+      return;
+    }
+
+    if (localModelMissing) {
+      setSendError('Download the offline model first (Settings → Local AI).');
       return;
     }
 
@@ -207,7 +218,9 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
         <div className={styles.messagesInner}>
           {!hasContent ? (
             <ChatEmptyState
-              hasProvider={!noProvider}
+              hasProvider={!noProvider && !localModelMissing}
+              localModelMissing={localModelMissing}
+              onUseOffline={() => onSetupOffline?.()}
               docNames={convDocNames as string[]}
               isIngesting={isIngesting}
               onOpenSettings={() => onOpenSettings?.()}
@@ -315,8 +328,10 @@ export function ChatPanel({ onOpenSettings, onOpenDocs }: ChatPanelProps) {
               className={styles.textarea}
               placeholder={
                 noProvider
-                  ? 'Connect a model provider in Settings to start…'
-                  : noDocs
+                  ? 'Choose offline or cloud answers to start…'
+                  : localModelMissing
+                    ? 'Download the offline model to start…'
+                    : noDocs
                     ? 'Add a document, then ask anything about it…'
                     : 'Ask about your documents…'
               }

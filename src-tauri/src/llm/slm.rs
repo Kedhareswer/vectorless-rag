@@ -34,8 +34,9 @@ use candle_transformers::models::quantized_qwen2 as qqwen2;
 use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
-/// Wall-clock cap for a single generation. Decoding stops here and the text
-/// produced so far is returned, so one slow call can't stall the pipeline.
+/// Wall-clock cap for a short helper generation (query enrichment, metadata).
+/// Decoding stops here and the text produced so far is returned, so one slow
+/// call can't stall the pipeline.
 const GENERATION_TIME_LIMIT: Duration = Duration::from_secs(12);
 
 /// Penalise recently generated tokens — tiny models loop without it.
@@ -115,6 +116,9 @@ fn last_token_logits(logits: &Tensor) -> candle_core::Result<Tensor> {
 // ── Global engine state ───────────────────────────────────────────────
 
 static ENGINE: OnceLock<Mutex<Option<SlmEngine>>> = OnceLock::new();
+/// Mirrors whether ENGINE holds a model, readable without waiting for a
+/// generation that holds the engine lock.
+static LOADED: AtomicBool = AtomicBool::new(false);
 
 fn engine_lock() -> &'static Mutex<Option<SlmEngine>> {
     ENGINE.get_or_init(|| Mutex::new(None))
@@ -128,6 +132,23 @@ struct SlmEngine {
     eos_ids: Vec<u32>,
     /// Begin-of-text token the model expects first (LFM2: `<|startoftext|>`).
     bos_id: Option<u32>,
+}
+
+/// Limits and hooks for one generation.
+pub struct GenerateOptions<'a> {
+    pub max_tokens: u32,
+    /// Decoding stops at this wall-clock limit; text so far is kept.
+    pub time_limit: Duration,
+    /// Decoding stops when this is set.
+    pub cancel: Option<&'a AtomicBool>,
+    /// Receives each new piece of text as it is decoded; return `false` to stop.
+    pub on_text: Option<&'a mut dyn FnMut(&str) -> bool>,
+}
+
+impl GenerateOptions<'_> {
+    fn short(max_tokens: u32) -> Self {
+        Self { max_tokens, time_limit: GENERATION_TIME_LIMIT, cancel: None, on_text: None }
+    }
 }
 
 /// Output of one generation call.
@@ -173,15 +194,13 @@ impl SlmEngine {
     /// Generate text from a pre-formatted prompt.
     ///
     /// Stops at EOS, `max_tokens`, the time limit, or when `cancel` is set.
-    fn generate(
-        &mut self,
-        prompt: &str,
-        max_tokens: u32,
-        cancel: Option<&AtomicBool>,
-    ) -> Result<Generation, String> {
-        let deadline = Instant::now() + GENERATION_TIME_LIMIT;
+    fn generate(&mut self, prompt: &str, opts: GenerateOptions<'_>) -> Result<Generation, String> {
+        let GenerateOptions { max_tokens, time_limit, cancel, mut on_text } = opts;
+        let deadline = Instant::now() + time_limit;
         let should_stop =
             || Instant::now() >= deadline || cancel.is_some_and(|c| c.load(Ordering::SeqCst));
+        // Bytes of decoded text already handed to `on_text`.
+        let mut emitted = 0usize;
 
         let encoded = self
             .tokenizer
@@ -240,6 +259,23 @@ impl SlmEngine {
             }
             output_tokens.push(next_token);
 
+            if let Some(cb) = on_text.as_mut() {
+                // Decode the whole output and hand over the new suffix. Re-decoding
+                // keeps multi-token characters intact; wait while the tail is an
+                // incomplete UTF-8 sequence (decoded as U+FFFD).
+                let text = self
+                    .tokenizer
+                    .decode(&output_tokens, true)
+                    .map_err(|e| format!("Decode error: {}", e))?;
+                if !text.ends_with('\u{FFFD}') && text.len() > emitted && text.is_char_boundary(emitted) {
+                    let keep_going = cb(&text[emitted..]);
+                    emitted = text.len();
+                    if !keep_going {
+                        break;
+                    }
+                }
+            }
+
             if should_stop() {
                 break;
             }
@@ -251,6 +287,13 @@ impl SlmEngine {
             .tokenizer
             .decode(&output_tokens, true)
             .map_err(|e| format!("Decode error: {}", e))?;
+
+        if let Some(cb) = on_text.as_mut()
+            && text.len() > emitted
+            && text.is_char_boundary(emitted)
+        {
+            cb(&text[emitted..]);
+        }
 
         Ok(Generation {
             text: text.trim().to_string(),
@@ -276,6 +319,7 @@ pub fn load_engine(model_path: &str, tokenizer_path: &str) -> Result<(), String>
     if guard.is_none() {
         *guard = Some(engine);
     }
+    LOADED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -284,23 +328,28 @@ pub fn unload_engine() {
     if let Ok(mut guard) = engine_lock().lock() {
         *guard = None;
     }
+    LOADED.store(false, Ordering::SeqCst);
 }
 
 /// Returns true if the SLM engine is loaded and ready for inference.
+/// Never blocks, even while a generation is running.
 pub fn is_engine_loaded() -> bool {
-    engine_lock()
-        .lock()
-        .map(|g| g.is_some())
-        .unwrap_or(false)
+    LOADED.load(Ordering::SeqCst)
 }
 
 /// Format a ChatML prompt (LFM2 / Qwen2.5 Instruct template).
 fn chatml_prompt(system: &str, user: &str) -> String {
-    format!(
-        "<|im_start|>system\n{system}<|im_end|>\n\
-         <|im_start|>user\n{user}<|im_end|>\n\
-         <|im_start|>assistant\n"
-    )
+    chatml_conversation(&[("system", system), ("user", user)])
+}
+
+/// Format a multi-turn ChatML prompt, ending with an open assistant turn.
+fn chatml_conversation(turns: &[(&str, &str)]) -> String {
+    let mut prompt = String::new();
+    for (role, content) in turns {
+        prompt.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n"));
+    }
+    prompt.push_str("<|im_start|>assistant\n");
+    prompt
 }
 
 /// Run a ChatML-formatted completion against the loaded model.
@@ -316,7 +365,21 @@ pub fn generate(
         .lock()
         .map_err(|e| format!("Engine lock: {}", e))?;
     let engine = guard.as_mut().ok_or("SLM engine not loaded")?;
-    engine.generate(&chatml_prompt(system, user), max_tokens, cancel)
+    let opts = GenerateOptions { cancel, ..GenerateOptions::short(max_tokens) };
+    engine.generate(&chatml_prompt(system, user), opts)
+}
+
+/// Answer a multi-turn conversation (`(role, content)` turns), streaming text
+/// through `opts.on_text`. Blocking — call from `spawn_blocking`.
+pub fn generate_conversation(
+    turns: &[(&str, &str)],
+    opts: GenerateOptions<'_>,
+) -> Result<Generation, String> {
+    let mut guard = engine_lock()
+        .lock()
+        .map_err(|e| format!("Engine lock: {}", e))?;
+    let engine = guard.as_mut().ok_or("SLM engine not loaded")?;
+    engine.generate(&chatml_conversation(turns), opts)
 }
 
 /// Convenience wrapper returning only the generated text.
@@ -541,13 +604,13 @@ mod tests {
         assert_eq!(engine.bos_id, Some(0));
 
         let prompt = chatml_prompt("w5 w6", "w7 w8 w9");
-        let first = engine.generate(&prompt, 12, None).unwrap();
+        let first = engine.generate(&prompt, GenerateOptions::short(12)).unwrap();
         assert!(first.prompt_tokens > 0);
         assert!(first.output_tokens <= 12);
 
         // A different prompt in between must not leak conv/KV state into the rerun.
-        engine.generate(&chatml_prompt("w20", "w21 w22 w23 w24"), 8, None).unwrap();
-        let again = engine.generate(&prompt, 12, None).unwrap();
+        engine.generate(&chatml_prompt("w20", "w21 w22 w23 w24"), GenerateOptions::short(8)).unwrap();
+        let again = engine.generate(&prompt, GenerateOptions::short(12)).unwrap();
         assert_eq!(first.text, again.text);
         assert_eq!(first.output_tokens, again.output_tokens);
     }
@@ -560,12 +623,12 @@ mod tests {
         assert!(matches!(engine.model, ModelWeights::Qwen2(_)));
 
         let prompt = chatml_prompt("w5 w6", "w7 w8 w9");
-        let first = engine.generate(&prompt, 12, None).unwrap();
+        let first = engine.generate(&prompt, GenerateOptions::short(12)).unwrap();
         assert!(first.prompt_tokens > 0);
         assert!(first.output_tokens <= 12);
 
         // Same prompt again: KV cache must reset, so output is identical.
-        let second = engine.generate(&prompt, 12, None).unwrap();
+        let second = engine.generate(&prompt, GenerateOptions::short(12)).unwrap();
         assert_eq!(first.text, second.text);
         assert_eq!(first.output_tokens, second.output_tokens);
     }
@@ -577,9 +640,58 @@ mod tests {
         let mut engine = SlmEngine::new(&model, &tokenizer).unwrap();
         let cancel = AtomicBool::new(true);
         let out = engine
-            .generate(&chatml_prompt("w5", "w7"), 50, Some(&cancel))
+            .generate(
+                &chatml_prompt("w5", "w7"),
+                GenerateOptions { cancel: Some(&cancel), ..GenerateOptions::short(50) },
+            )
             .unwrap();
         assert!(out.output_tokens <= 1);
+    }
+
+    #[test]
+    fn streams_text_that_adds_up_to_the_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, tokenizer) = write_tiny_lfm2(tmp.path());
+        let mut engine = SlmEngine::new(&model, &tokenizer).unwrap();
+        let prompt = chatml_conversation(&[("system", "w5"), ("user", "w7 w8"), ("assistant", "w9"), ("user", "w10")]);
+
+        let mut streamed = String::new();
+        let mut on_text = |t: &str| {
+            streamed.push_str(t);
+            true
+        };
+        let out = engine
+            .generate(&prompt, GenerateOptions { on_text: Some(&mut on_text), ..GenerateOptions::short(16) })
+            .unwrap();
+        assert_eq!(streamed.trim(), out.text);
+    }
+
+    #[test]
+    fn streaming_callback_can_stop_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (model, tokenizer) = write_tiny_lfm2(tmp.path());
+        let mut engine = SlmEngine::new(&model, &tokenizer).unwrap();
+        let mut calls = 0;
+        let mut on_text = |_: &str| {
+            calls += 1;
+            false
+        };
+        let out = engine
+            .generate(
+                &chatml_prompt("w5", "w7"),
+                GenerateOptions { on_text: Some(&mut on_text), ..GenerateOptions::short(40) },
+            )
+            .unwrap();
+        assert!(out.output_tokens <= 2, "stopped after {} tokens", out.output_tokens);
+    }
+
+    #[test]
+    fn chatml_conversation_keeps_turn_order() {
+        let p = chatml_conversation(&[("system", "s"), ("user", "u1"), ("assistant", "a1"), ("user", "u2")]);
+        assert_eq!(
+            p,
+            "<|im_start|>system\ns<|im_end|>\n<|im_start|>user\nu1<|im_end|>\n<|im_start|>assistant\na1<|im_end|>\n<|im_start|>user\nu2<|im_end|>\n<|im_start|>assistant\n"
+        );
     }
 
     #[test]

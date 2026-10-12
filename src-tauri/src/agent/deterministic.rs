@@ -90,6 +90,32 @@ pub fn fetch_content(
     }
 }
 
+impl FetchedContent {
+    /// Keep sections in fetch (relevance) order until `max_chars` of content;
+    /// the section that crosses the limit is cut at a char boundary. Used for
+    /// smaller answer models with a slower, shorter context.
+    pub fn limit_to(&mut self, max_chars: usize) {
+        let mut used = 0usize;
+        let mut kept = Vec::with_capacity(self.sections.len());
+        for mut section in std::mem::take(&mut self.sections) {
+            if used >= max_chars {
+                break;
+            }
+            let room = max_chars - used;
+            if section.content.len() > room {
+                section.content = safe_truncate(&section.content, room).to_string();
+                if section.content.is_empty() {
+                    break; // no room for even one character of this section
+                }
+            }
+            used += section.content.len();
+            kept.push(section);
+        }
+        self.sections = kept;
+        self.total_chars = used;
+    }
+}
+
 /// Format fetched content into a string for the LLM prompt.
 pub fn format_for_prompt(fetched: &FetchedContent) -> String {
     let mut parts = Vec::new();
@@ -695,6 +721,29 @@ mod tests {
             "Total chars {} should be near budget {}",
             result.total_chars, CONTENT_BUDGET
         );
+    }
+
+    #[test]
+    fn limit_to_keeps_leading_sections_within_budget() {
+        let section = |t: &str, n: usize| FetchedSection {
+            doc_name: "d".to_string(),
+            section_title: t.to_string(),
+            content: "é".repeat(n), // 2 bytes per char
+            node_ids: vec![],
+        };
+        let mut fetched = FetchedContent {
+            sections: vec![section("a", 10), section("b", 10), section("c", 10)],
+            fetch_steps: vec![],
+            total_chars: 60,
+        };
+        fetched.limit_to(31);
+        let titles: Vec<&str> = fetched.sections.iter().map(|s| s.section_title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b"]);
+        assert_eq!(fetched.sections[1].content.len(), 10); // 11 bytes of room, cut to a char boundary
+        assert_eq!(fetched.total_chars, 30);
+
+        fetched.limit_to(1_000);
+        assert_eq!(fetched.sections.len(), 2);
     }
 
     #[test]

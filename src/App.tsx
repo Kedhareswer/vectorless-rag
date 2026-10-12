@@ -12,6 +12,7 @@ import { TracePanel } from './components/preview/TracePanel';
 import { SettingsModal } from './components/settings/SettingsModal';
 import { ModelDownloadDialog } from './components/common/ModelDownloadDialog';
 import { getSetting, setSetting, checkLocalModel } from './lib/tauri';
+import { useLocalModelStore } from './stores/localModel';
 import { useShortcuts } from './hooks/useShortcuts';
 import styles from './App.module.css';
 
@@ -24,6 +25,7 @@ function App() {
   const [showTracePanel, setShowTracePanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [showModelDialog, setShowModelDialog] = useState(false);
 
   // Stores
   const activeConversationId = useChatStore((s) => s.activeConversationId);
@@ -34,6 +36,8 @@ function App() {
   const docsCount = useChatStore((s) => s.conversationDocIds.length);
   const loadDocuments = useDocumentsStore((s) => s.loadDocuments);
   const loadProviders = useSettingsStore((s) => s.loadProviders);
+  const enableLocalProvider = useSettingsStore((s) => s.enableLocalProvider);
+  const refreshLocalModel = useLocalModelStore((s) => s.refreshStatus);
 
   const activeConv = conversations.find((c) => c.id === activeConversationId);
 
@@ -43,7 +47,8 @@ function App() {
     loadConversations().then(resumeLastConversation);
     loadDocuments();
     loadProviders();
-  }, [initialize, loadConversations, resumeLastConversation, loadDocuments, loadProviders]);
+    refreshLocalModel();
+  }, [refreshLocalModel, initialize, loadConversations, resumeLastConversation, loadDocuments, loadProviders]);
 
   // Onboarding check
   useEffect(() => {
@@ -62,6 +67,15 @@ function App() {
   const handleOnboardingClose = () => {
     setShowOnboarding(false);
     setSetting('onboarding_done', '1').catch(() => {});
+    void refreshLocalModel();
+    // Downloaded the model and has no provider yet: answer offline by default.
+    checkLocalModel()
+      .then((status) => {
+        if (status.downloaded && useSettingsStore.getState().providers.length === 0) {
+          void enableLocalProvider();
+        }
+      })
+      .catch(() => {});
   };
 
   const toggleDocsPanel = useCallback(() => {
@@ -71,6 +85,13 @@ function App() {
   const toggleTracePanel = useCallback(() => {
     setShowTracePanel((v) => !v);
   }, []);
+
+  /** Answer offline: select the Local provider, then offer the model download if needed. */
+  const setupOffline = useCallback(async () => {
+    await enableLocalProvider();
+    const status = await checkLocalModel().catch(() => null);
+    if (!status?.downloaded) setShowModelDialog(true);
+  }, [enableLocalProvider]);
 
   const focusInput = useCallback(() => {
     // Let any panel/dropdown close first so focus lands in the composer.
@@ -111,6 +132,7 @@ function App() {
         <ChatPanel
           onOpenSettings={() => setShowSettings(true)}
           onOpenDocs={toggleDocsPanel}
+          onSetupOffline={() => void setupOffline()}
         />
       </main>
 
@@ -135,6 +157,15 @@ function App() {
 
       {/* Settings modal */}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {showModelDialog && (
+        <ModelDownloadDialog
+          onClose={() => {
+            setShowModelDialog(false);
+            void refreshLocalModel();
+          }}
+        />
+      )}
 
       {/* Onboarding model download */}
       {showOnboarding && (

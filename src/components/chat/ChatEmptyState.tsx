@@ -1,12 +1,16 @@
-import { Check, FileText, LoaderCircle, MessageSquareText, Plus, Server } from 'lucide-react';
+import { Check, Cloud, FileText, HardDrive, LoaderCircle, MessageSquareText, Plus, Server } from 'lucide-react';
 import clsx from 'clsx';
 import styles from './ChatEmptyState.module.css';
 
 interface ChatEmptyStateProps {
   hasProvider: boolean;
+  /** The Local (offline) provider is selected but its model isn't downloaded. */
+  localModelMissing?: boolean;
   docNames: string[];
   isIngesting: boolean;
   onOpenSettings: () => void;
+  /** Answer with the offline model (adds the provider, offers the download). */
+  onUseOffline: () => void;
   onAddDocument: () => void;
   onFocusInput: () => void;
   /** Send a starter question. */
@@ -30,9 +34,11 @@ export function starterQuestions(docCount: number): string[] {
  */
 export function ChatEmptyState({
   hasProvider,
+  localModelMissing = false,
   docNames,
   isIngesting,
   onOpenSettings,
+  onUseOffline,
   onAddDocument,
   onFocusInput,
   onAsk,
@@ -59,27 +65,40 @@ export function ChatEmptyState({
     );
   }
 
-  const steps = [
+  interface StepAction {
+    label: string;
+    onClick: () => void;
+    icon?: typeof Plus;
+    busy?: boolean;
+  }
+  const steps: { done: boolean; icon: typeof Plus; title: string; detail: string; actions: StepAction[] }[] = [
     {
       done: hasProvider,
       icon: Server,
-      title: 'Connect a model provider',
-      detail: 'Anthropic, OpenAI, Gemini, Groq, Ollama and more. Keys stay in your OS keychain.',
-      action: { label: 'Open settings', onClick: onOpenSettings },
+      title: localModelMissing ? 'Download the offline model' : 'Choose how to answer',
+      detail: localModelMissing
+        ? 'One ~700 MB download, then everything runs on this computer.'
+        : 'Offline on this computer (one ~700 MB download, private and free), or a cloud provider like Anthropic or OpenAI for the strongest answers.',
+      actions: localModelMissing
+        ? [{ label: 'Download', onClick: onUseOffline, icon: HardDrive }]
+        : [
+            { label: 'Use offline model', onClick: onUseOffline, icon: HardDrive },
+            { label: 'Cloud provider', onClick: onOpenSettings, icon: Cloud },
+          ],
     },
     {
       done: hasDocs,
       icon: FileText,
       title: 'Add a document',
       detail: 'PDF, Word, Markdown, spreadsheets or code. You can also drop files here.',
-      action: { label: isIngesting ? 'Adding…' : 'Add document', onClick: onAddDocument, busy: isIngesting },
+      actions: [{ label: isIngesting ? 'Adding…' : 'Add document', onClick: onAddDocument, icon: Plus, busy: isIngesting }],
     },
     {
       done: false,
       icon: MessageSquareText,
       title: 'Ask a question',
       detail: 'TGG reads the right sections and answers with one model call.',
-      action: { label: 'Start typing', onClick: onFocusInput },
+      actions: [{ label: 'Start typing', onClick: onFocusInput }],
     },
   ];
   const next = steps.findIndex((s) => !s.done);
@@ -101,19 +120,27 @@ export function ChatEmptyState({
                 <span className={styles.itemDetail}>{step.detail}</span>
               </div>
               {!step.done && (
-                <button
-                  type="button"
-                  className={clsx(styles.action, current && styles.actionPrimary)}
-                  onClick={step.action.onClick}
-                  disabled={locked || ('busy' in step.action && step.action.busy)}
-                >
-                  {'busy' in step.action && step.action.busy ? (
-                    <LoaderCircle size={13} className={styles.spin} />
-                  ) : i === 1 ? (
-                    <Plus size={13} />
-                  ) : null}
-                  {step.action.label}
-                </button>
+                <div className={styles.actions}>
+                  {step.actions.map((action, a) => {
+                    const ActionIcon = action.icon;
+                    return (
+                      <button
+                        key={action.label}
+                        type="button"
+                        className={clsx(styles.action, current && a === 0 && styles.actionPrimary)}
+                        onClick={action.onClick}
+                        disabled={locked || action.busy}
+                      >
+                        {action.busy ? (
+                          <LoaderCircle size={13} className={styles.spin} />
+                        ) : ActionIcon ? (
+                          <ActionIcon size={13} />
+                        ) : null}
+                        {action.label}
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </li>
           );

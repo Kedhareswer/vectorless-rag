@@ -73,7 +73,8 @@ Phase 8  Save full trace (preprocessing + fetch + LLM steps)
 
 **Critical pipeline rules:**
 - LLM NEVER gets tools. `provider.chat_stream(messages, None, token_tx)` — tools always `None`.
-- Enrichment runs on the local SLM (free, offline) and only when a model is loaded; the final answer uses the selected provider/model.
+- Enrichment runs on the local SLM (free, offline) and only when a model is loaded; the final answer uses the selected provider/model — which may itself be the local SLM (`local` provider, see below).
+- With the `local` provider, content is cut to 12,000 chars (`FetchedContent::limit_to`) and history to 2,000 tokens, and cost is 0.
 - Each SLM generation is capped at 12s (partial text kept) and stops when the user cancels.
 - Preprocessing errors are non-fatal — step marked "Skipped", pipeline continues.
 - Content budget: **40,000 chars** per query (`CONTENT_BUDGET` in `deterministic.rs`).
@@ -109,6 +110,7 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **xAI / Grok** — Grok 3, Grok 3 Mini
 - **Qwen** — Qwen Max, Qwen Plus, Qwen Turbo
 - **Ollama** — Any model served by a local Ollama; NDJSON token streaming, 16k context requested
+- **Local (offline)** — `llm/local_provider.rs`: answers with the in-process SLM (default LFM2.5-1.2B-Instruct), streamed, no API key, not wrapped in RetryProvider
 - All wrapped with `RetryProvider` for automatic retry on transient errors.
 - Unified `LLMProvider` trait: `chat()` + `chat_stream()` + `capabilities()`
 
@@ -169,7 +171,7 @@ Intent → fetch strategy:
 - Not part of the query pipeline: it only fills the chat input
 
 ## Known Limitations
-- **SLM inference quality**: default local model is Liquid LFM2.5-230M (QAD Q4_0, ~150 MB; LFM2.5-350M and Qwen2.5-0.5B also offered). Good for enrichment terms; summaries/entities are approximate and never user-facing answers.
+- **Local model**: ONE download does all local work (enrichment, metadata, and answers via the `local` provider): Liquid LFM2.5-1.2B-Instruct QAD Q4_0 (~700 MB; Liquid's recommended successor to the deprecated LFM2-1.2B-RAG). LFM2.5-230M (~150 MB) is offered for low-memory PCs — enrichment only, too small for reliable answers. Local answers are slower (CPU) and simpler than large cloud models.
 - **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
 - **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. Scanned PDFs need OCR, which is not compiled in (tesseract / oar-ocr features are heavy).
 
@@ -256,7 +258,8 @@ src-tauri/src/
   llm/
     provider.rs             — LLMProvider trait, Message, LLMResponse, ProviderConfig
     retry.rs                — RetryProvider (exponential backoff)
-    slm.rs                  — candle in-process GGUF inference (lfm2/qwen2/llama arch; weights loaded once)
+    slm.rs                  — candle in-process GGUF inference (lfm2/qwen2/llama arch; weights loaded once; streaming)
+    local_provider.rs       — `local` answer provider over slm.rs (offline answers)
     local.rs                — model download/management, delegates inference to slm.rs
     dictation.rs            — offline Whisper speech-to-text (model catalog, download, transcribe)
     anthropic.rs            — Anthropic (real SSE streaming)
@@ -280,6 +283,7 @@ src/
   lib/pipelineSteps.ts      — step label/icon registry
   lib/shortcuts.ts          — keyboard shortcut registry
   lib/format.ts             — latency/cost/count formatting
+  lib/providers.ts          — provider display names (e.g. "Local (offline)")
   hooks/useShortcuts.ts, hooks/useAddDocument.ts
   components/
     common/TopBar.tsx         — top navigation bar with ConversationSwitcher + icon buttons

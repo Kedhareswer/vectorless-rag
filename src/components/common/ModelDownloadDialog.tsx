@@ -87,7 +87,7 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
         <div className={styles.header}>
           <Cpu size={18} />
           <h2 className={styles.title}>
-            {isOnboarding ? 'Welcome to TGG' : 'Local Model for Document Enrichment'}
+            {isOnboarding ? 'Welcome to TGG' : 'Offline Model'}
           </h2>
           <button type="button" className={styles.closeBtn} onClick={onClose}>
             <X size={16} />
@@ -96,8 +96,8 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
 
         <p className={styles.description}>
           {isOnboarding
-            ? 'TGG uses a small local AI model to enrich your documents with summaries, entities, and topics before you query them — making answers faster and more accurate. The model runs entirely on your device and is never sent to any server.'
-            : 'A small local AI model generates summaries and metadata for each document section, enabling faster and more accurate answers. The model runs entirely on your device.'}
+            ? 'Download one small model and TGG works fully offline: it answers your questions, improves search and summarises documents — all on this computer. Nothing is sent to any server. You can also connect a cloud provider later.'
+            : 'One model for everything offline: it answers questions (choose "Local (offline)" as the provider), improves search, and summarises document sections. It runs entirely on this computer.'}
         </p>
 
         {status?.downloaded ? (

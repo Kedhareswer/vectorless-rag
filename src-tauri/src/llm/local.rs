@@ -9,7 +9,7 @@
 //! ## What gets downloaded
 //!
 //! When the user clicks "Download" in the Settings → Local Model dialog:
-//!   1. The GGUF model file (default: Liquid LFM2.5-230M, ~150 MB)
+//!   1. The GGUF model file (default: Liquid LFM2.5-1.2B-Instruct, ~700 MB)
 //!   2. Its tokenizer.json from the model's HuggingFace repo, saved as
 //!      `<model-stem>.tokenizer.json` so models never share a tokenizer
 //!
@@ -82,6 +82,15 @@ pub fn chat_inference(system: &str, user: &str, max_tokens: u32) -> Result<Strin
     slm::chat_inference(system, user, max_tokens)
 }
 
+/// Answer a multi-turn conversation with the local model, streaming text.
+/// Blocking — must not be called from async context directly.
+pub fn generate_conversation(
+    turns: &[(&str, &str)],
+    opts: slm::GenerateOptions<'_>,
+) -> Result<slm::Generation, String> {
+    slm::generate_conversation(turns, opts)
+}
+
 /// Like `chat_inference`, but also reports token counts and can be cancelled.
 /// Blocking — must not be called from async context directly.
 pub fn generate(
@@ -147,45 +156,35 @@ pub struct DownloadProgress {
 
 /// Available models for download. The first entry is the recommended default.
 ///
-/// LFM2.5 (Liquid AI, 2026) replaces Qwen2.5 as the default: smaller and much
-/// better at following instructions (IFEval 71.7 for 230M, 77.0 for 350M vs
-/// ~42 for Qwen2.5-0.5B, per published model cards). The QAD Q4_0 files are
-/// Liquid's quantization-aware-distilled 4-bit checkpoints, which keep ~97% of
-/// full-precision accuracy. Qwen2.5 stays available for existing users.
+/// One model does everything local: query enrichment and, with the "Local
+/// (offline)" provider, the answers themselves. LFM2.5-1.2B-Instruct is
+/// Liquid AI's recommended model for answering from supplied documents (it
+/// replaces their deprecated LFM2-1.2B-RAG). The QAD Q4_0 files are Liquid's
+/// quantization-aware-distilled 4-bit checkpoints (~97% of full-precision
+/// quality). The 230M model is a lightweight option for enrichment only.
 pub fn get_model_options() -> Vec<ModelOption> {
     vec![
         ModelOption {
+            id: "lfm2.5-1.2b-instruct-qad-q4".to_string(),
+            name: "LFM2.5 1.2B Instruct".to_string(),
+            description: "Answers questions offline and improves search. Recommended.".to_string(),
+            size_bytes: 700_000_000,
+            size_label: "~700 MB".to_string(),
+            url: "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf".to_string(),
+            filename: "LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf".to_string(),
+            sha256: None,
+            tokenizer_url: "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct/resolve/main/tokenizer.json".to_string(),
+        },
+        ModelOption {
             id: "lfm2.5-230m-qad-q4".to_string(),
-            name: "LFM2.5 230M".to_string(),
-            description: "Smallest and fastest. Recommended for query enrichment.".to_string(),
+            name: "LFM2.5 230M (lightweight)".to_string(),
+            description: "Search help only — too small for reliable answers. For low-memory PCs.".to_string(),
             size_bytes: 150_000_000,
             size_label: "~150 MB".to_string(),
             url: "https://huggingface.co/LiquidAI/LFM2.5-230M-GGUF/resolve/main/LFM2.5-230M-QAD-Q4_0.gguf".to_string(),
             filename: "LFM2.5-230M-QAD-Q4_0.gguf".to_string(),
             sha256: None,
             tokenizer_url: "https://huggingface.co/LiquidAI/LFM2.5-230M/resolve/main/tokenizer.json".to_string(),
-        },
-        ModelOption {
-            id: "lfm2.5-350m-qad-q4".to_string(),
-            name: "LFM2.5 350M".to_string(),
-            description: "Better summaries and instruction following, still small.".to_string(),
-            size_bytes: 220_000_000,
-            size_label: "~220 MB".to_string(),
-            url: "https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/resolve/main/LFM2.5-350M-QAD-Q4_0.gguf".to_string(),
-            filename: "LFM2.5-350M-QAD-Q4_0.gguf".to_string(),
-            sha256: None,
-            tokenizer_url: "https://huggingface.co/LiquidAI/LFM2.5-350M/resolve/main/tokenizer.json".to_string(),
-        },
-        ModelOption {
-            id: "qwen2.5-0.5b-q4".to_string(),
-            name: "Qwen2.5 0.5B (Q4)".to_string(),
-            description: "Previous default. Larger and weaker than LFM2.5.".to_string(),
-            size_bytes: 491_400_032,
-            size_label: "~491 MB".to_string(),
-            url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string(),
-            filename: "qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string(),
-            sha256: None,
-            tokenizer_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json".to_string(),
         },
     ]
 }
@@ -530,10 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn default_model_is_small_lfm2_5() {
+    fn default_model_is_the_answering_lfm2_5() {
         let first = &get_model_options()[0];
-        assert_eq!(first.id, "lfm2.5-230m-qad-q4");
-        assert!(first.size_bytes < 200_000_000);
+        assert_eq!(first.id, "lfm2.5-1.2b-instruct-qad-q4");
+        assert!(first.size_bytes < 1_000_000_000);
+        assert!(first.url.contains("LiquidAI/LFM2.5-1.2B-Instruct-GGUF"));
     }
 
     #[test]

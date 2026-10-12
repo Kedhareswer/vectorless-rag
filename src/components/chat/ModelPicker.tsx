@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Server, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import { useSettingsStore } from '../../stores/settings';
+import { providerDisplayName, providerModelLabel } from '../../lib/providers';
 import styles from './ModelPicker.module.css';
 
 interface ModelPickerProps {
@@ -39,7 +40,7 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
         title="Model used to answer"
       >
         <Server size={11} />
-        <span className={styles.chipText}>{active.model || active.name}</span>
+        <span className={styles.chipText}>{providerModelLabel(active)}</span>
         <ChevronDown size={11} />
       </button>
 
@@ -59,8 +60,8 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
               }}
             >
               <span className={styles.itemText}>
-                <span className={styles.itemModel}>{p.model || '(no model set)'}</span>
-                <span className={styles.itemProvider}>{p.name}</span>
+                <span className={styles.itemModel}>{providerModelLabel(p)}</span>
+                <span className={styles.itemProvider}>{providerDisplayName(p.name)}</span>
               </span>
               {p.id === activeProviderId && <Check size={13} className={styles.check} />}
             </button>

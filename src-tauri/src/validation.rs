@@ -9,10 +9,10 @@ pub fn validate_provider(config: &ProviderConfig) -> Result<(), String> {
         return Err("Model name is required.".to_string());
     }
 
-    // Ollama doesn't require an API key or base URL validation
-    let is_ollama = config.name.to_lowercase() == "ollama";
+    // Ollama and the in-process local model don't use API keys.
+    let needs_key = !matches!(config.name.to_lowercase().as_str(), "ollama" | "local");
 
-    if !is_ollama {
+    if needs_key {
         if let Some(ref key) = config.api_key {
             if key.trim().is_empty() {
                 return Err("API key is required for this provider.".to_string());
@@ -113,6 +113,12 @@ mod tests {
     fn empty_api_key_fails_for_non_ollama() {
         let config = make_config("openai", "gpt-4o", Some("  "), "");
         assert!(validate_provider(&config).is_err());
+    }
+
+    #[test]
+    fn local_provider_without_api_key_passes() {
+        let config = make_config("local", "on-device", None, "");
+        assert!(validate_provider(&config).is_ok());
     }
 
     #[test]

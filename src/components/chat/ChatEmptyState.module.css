@@ -135,8 +135,16 @@
   color: var(--text-tertiary);
 }
 
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .action {
   display: inline-flex;
+  justify-content: center;
   align-items: center;
   gap: 5px;
   flex-shrink: 0;

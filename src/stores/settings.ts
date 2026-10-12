@@ -6,6 +6,9 @@ import {
   type ProviderConfig as TauriProviderConfig,
 } from '../lib/tauri';
 
+/** Provider name of the offline model running on this computer. */
+export const LOCAL_PROVIDER = 'local';
+
 export interface ProviderConfig {
   id: string;
   name: string;      // "ollama" | "groq" | "google" | "openrouter" | "agentrouter"
@@ -53,6 +56,8 @@ interface SettingsState {
   setActiveProvider: (id: string | null) => void;
   /** Make a configured provider the active one and persist the change. */
   activateProvider: (id: string) => Promise<void>;
+  /** Answer with the offline local model: add the Local provider if needed and activate it. */
+  enableLocalProvider: () => Promise<void>;
   loadProviders: () => Promise<void>;
   saveProviderToBackend: (provider: ProviderConfig) => Promise<void>;
   deleteProviderFromBackend: (id: string) => Promise<void>;
@@ -127,6 +132,23 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       console.warn('Failed to switch provider:', err);
       set({ error: String(err) });
     }
+  },
+  enableLocalProvider: async () => {
+    const existing = get().providers.find((p) => p.name === LOCAL_PROVIDER);
+    if (existing) {
+      await get().activateProvider(existing.id);
+      return;
+    }
+    const local: ProviderConfig = {
+      id: `local-${Date.now()}`,
+      name: LOCAL_PROVIDER,
+      apiKey: '',
+      baseUrl: '',
+      model: 'on-device',
+      isActive: false,
+    };
+    await get().saveProviderToBackend(local);
+    if (!get().error) await get().activateProvider(local.id);
   },
   saveProviderToBackend: async (provider: ProviderConfig) => {
     set({ error: null });
