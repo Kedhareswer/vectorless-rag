@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, lazy, Suspense } from 'react';
 import { useThemeStore } from './stores/theme';
 import { useChatStore } from './stores/chat';
 import { useDocumentsStore } from './stores/documents';
@@ -11,11 +11,16 @@ import { DocsPanel } from './components/preview/DocsPanel';
 import { TracePanel } from './components/preview/TracePanel';
 import { SettingsModal } from './components/settings/SettingsModal';
 import { ModelDownloadDialog } from './components/common/ModelDownloadDialog';
+import { useGuidesStore } from './stores/guides';
 import { getSetting, setSetting, checkLocalModel } from './lib/tauri';
 import { useLocalModelStore } from './stores/localModel';
 import { useLocalServersStore } from './stores/localServers';
 import { useShortcuts } from './hooks/useShortcuts';
 import styles from './App.module.css';
+
+// Shown once or on demand, so kept out of the startup bundle.
+const WelcomeTour = lazy(() => import('./components/onboarding/WelcomeTour').then((m) => ({ default: m.WelcomeTour })));
+const AddModelDialog = lazy(() => import('./components/onboarding/AddModelDialog').then((m) => ({ default: m.AddModelDialog })));
 
 function App() {
   const initialize = useThemeStore((s) => s.initialize);
@@ -25,7 +30,6 @@ function App() {
   const [showDocsPanel, setShowDocsPanel] = useState(false);
   const [showTracePanel, setShowTracePanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [showOnboarding, setShowOnboarding] = useState(false);
   const [showModelDialog, setShowModelDialog] = useState(false);
 
   // Stores
@@ -40,6 +44,7 @@ function App() {
   const enableLocalProvider = useSettingsStore((s) => s.enableLocalProvider);
   const refreshLocalModel = useLocalModelStore((s) => s.refreshStatus);
   const detectLocalServers = useLocalServersStore((s) => s.detect);
+  const { tourOpen, openTour, closeTour, addModelOpen, addModelPath, closeAddModel } = useGuidesStore();
 
   const activeConv = conversations.find((c) => c.id === activeConversationId);
 
@@ -54,32 +59,18 @@ function App() {
     detectLocalServers();
   }, [refreshLocalModel, detectLocalServers, initialize, loadConversations, resumeLastConversation, loadDocuments, loadProviders]);
 
-  // Onboarding check
+  // First run: a short welcome tour. Setting up a model is shown later, when one is needed.
   useEffect(() => {
-    getSetting('onboarding_done').then((done) => {
-      if (done) return;
-      checkLocalModel().then((status) => {
-        if (!status.downloaded) {
-          setShowOnboarding(true);
-        } else {
-          setSetting('onboarding_done', '1').catch(() => {});
-        }
-      }).catch(() => {});
-    }).catch(() => {});
-  }, []);
-
-  const handleOnboardingClose = () => {
-    setShowOnboarding(false);
-    setSetting('onboarding_done', '1').catch(() => {});
-    void refreshLocalModel();
-    // Downloaded the model and has no provider yet: answer offline by default.
-    checkLocalModel()
-      .then((status) => {
-        if (status.downloaded && useSettingsStore.getState().providers.length === 0) {
-          void enableLocalProvider();
-        }
+    getSetting('onboarding_done')
+      .then((done) => {
+        if (!done) openTour();
       })
       .catch(() => {});
+  }, [openTour]);
+
+  const handleTourClose = () => {
+    closeTour();
+    setSetting('onboarding_done', '1').catch(() => {});
   };
 
   const toggleDocsPanel = useCallback(() => {
@@ -171,10 +162,18 @@ function App() {
         />
       )}
 
-      {/* Onboarding model download */}
-      {showOnboarding && (
-        <ModelDownloadDialog onClose={handleOnboardingClose} isOnboarding />
-      )}
+      <Suspense fallback={null}>
+        {tourOpen && <WelcomeTour onClose={handleTourClose} />}
+
+        {/* How to add a model, opened when the user first needs one */}
+        {addModelOpen && (
+          <AddModelDialog
+            initialPath={addModelPath}
+            onClose={closeAddModel}
+            onSetupOffline={() => void setupOffline()}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

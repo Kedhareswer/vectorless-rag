@@ -102,3 +102,8 @@
   border-radius: 0 0 var(--radius-md) var(--radius-md);
   color: var(--text-secondary);
 }
+
+.manage + .manage {
+  margin-top: 0;
+  border-top: none;
+}

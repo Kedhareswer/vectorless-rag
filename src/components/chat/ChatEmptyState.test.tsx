@@ -6,7 +6,7 @@ const props = (overrides = {}) => ({
   hasProvider: false,
   docNames: [] as string[],
   isIngesting: false,
-  onOpenSettings: vi.fn(),
+  onAddModel: vi.fn(),
   onUseOffline: vi.fn(),
   onAddDocument: vi.fn(),
   onFocusInput: vi.fn(),
@@ -15,13 +15,11 @@ const props = (overrides = {}) => ({
 });
 
 describe('ChatEmptyState', () => {
-  it('starts by choosing offline or cloud answers, and locks later steps', () => {
+  it('starts by adding a model, and locks later steps', () => {
     const p = props();
     render(<ChatEmptyState {...p} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Use offline model' }));
-    expect(p.onUseOffline).toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Cloud provider' }));
-    expect(p.onOpenSettings).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    expect(p.onAddModel).toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /Add document/ })).toBeDisabled();
   });
 
@@ -32,7 +30,8 @@ describe('ChatEmptyState', () => {
     expect(screen.getByText(/answer with llama3.2:3b, no download needed/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Use Ollama model' }));
     expect(onUseLocalServer).toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Built-in offline model' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Other options' }));
+    expect(p.onAddModel).toHaveBeenCalled();
   });
 
   it('asks for the download when the offline provider has no model yet', () => {
@@ -46,7 +45,7 @@ describe('ChatEmptyState', () => {
   it('moves on to adding a document once a provider exists', () => {
     const p = props({ hasProvider: true });
     render(<ChatEmptyState {...p} />);
-    expect(screen.queryByRole('button', { name: 'Use offline model' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add a model' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Add document/ }));
     expect(p.onAddDocument).toHaveBeenCalled();
   });

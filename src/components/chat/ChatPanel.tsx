@@ -15,6 +15,7 @@ import { useAddDocument } from '../../hooks/useAddDocument';
 import { useLocalModelStore } from '../../stores/localModel';
 import { isLocalProvider } from '../../lib/providers';
 import { useLocalServersStore, firstUsableServer } from '../../stores/localServers';
+import { useGuidesStore } from '../../stores/guides';
 import { MessageActions } from './MessageActions';
 import { DictationButton } from './DictationButton';
 import styles from './ChatPanel.module.css';
@@ -56,6 +57,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
   const localModelMissing = isLocalProvider(activeProvider) && !localModelDownloaded;
   const localServer = firstUsableServer(useLocalServersStore((s) => s.servers));
   const selectServerModel = useSettingsStore((s) => s.selectServerModel);
+  const openAddModel = useGuidesStore((s) => s.openAddModel);
 
   const streamingContentRef = useRef('');
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -127,7 +129,8 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
     const docIds = [...conversationDocIds];
 
     if (!activeProviderId || !activeProvider) {
-      setSendError('Choose how to answer first: the offline model or a cloud provider.');
+      // First time a model is needed: show how to add one.
+      openAddModel();
       return;
     }
 
@@ -232,7 +235,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
               onUseOffline={() => onSetupOffline?.()}
               docNames={convDocNames as string[]}
               isIngesting={isIngesting}
-              onOpenSettings={() => onOpenSettings?.()}
+              onAddModel={() => openAddModel()}
               onAddDocument={() => void pickAndAdd()}
               onFocusInput={() => textareaRef.current?.focus()}
               onAsk={(q) => void handleSend(q)}
@@ -337,7 +340,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
               className={styles.textarea}
               placeholder={
                 noProvider
-                  ? 'Choose offline or cloud answers to start…'
+                  ? 'Add a model to start…'
                   : localModelMissing
                     ? 'Download the offline model to start…'
                     : noDocs

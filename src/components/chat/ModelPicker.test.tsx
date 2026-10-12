@@ -4,6 +4,7 @@ import { ModelPicker } from './ModelPicker';
 import { useSettingsStore } from '../../stores/settings';
 import * as tauri from '../../lib/tauri';
 import { useLocalServersStore } from '../../stores/localServers';
+import { useGuidesStore } from '../../stores/guides';
 
 vi.mock('../../lib/tauri', () => ({
   getProviders: vi.fn().mockResolvedValue([]),
@@ -55,9 +56,10 @@ describe('ModelPicker', () => {
     expect(onOpenSettings).toHaveBeenCalled();
   });
 
-  it('renders nothing without an active provider', () => {
+  it('offers to add a model when none is set up', () => {
     useSettingsStore.setState({ providers: [], activeProviderId: null });
-    const { container } = render(<ModelPicker onOpenSettings={vi.fn()} />);
-    expect(container).toBeEmptyDOMElement();
+    render(<ModelPicker onOpenSettings={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    expect(useGuidesStore.getState()).toMatchObject({ addModelOpen: true, addModelPath: null });
   });
 });

@@ -199,8 +199,13 @@ Intent → fetch strategy:
 - Launch resumes the last chat (`resumeLastConversation`); `startNewChat` reuses an empty chat; untitled chats are named after the first question
 - Add documents ONLY via `hooks/useAddDocument` (ingest → attach, creating a chat if none is open)
 - Composer ModelPicker switches the active provider (`activateProvider` persists both rows)
-- SettingsModal: two-pane, sections from `SETTINGS_SECTIONS` (Providers, Local AI, Appearance, Data); model is free text with suggestions
+- SettingsModal: two-pane, sections from `SETTINGS_SECTIONS` (Providers, Local AI, Appearance, Data, Help); model is free text with suggestions
 - Answers have a Copy action (`MessageActions`)
+
+### Onboarding & guides (`components/onboarding/`, store `stores/guides.ts`)
+- First run (`onboarding_done` setting unset): `WelcomeTour` — 3 slides: what TGG does, why a model is needed (answer writer required, LFM2.5 search helper optional), the three ways to answer. It never forces a download.
+- How-to is shown only when needed: `AddModelDialog` opens on send without a provider, from the checklist ("Add a model"), the composer ModelPicker, and Settings → Providers / Help. Each option (`installed` / `offline` / `cloud`, registry `lib/modelGuides.ts`) has steps, a looping screen recording and the action itself (pick a detected Ollama/LM Studio model, download the offline model, or paste a cloud API key).
+- Recordings: `src/assets/guides/*.webm` (in-app clips) and `docs/media/onboarding.mp4` (full walkthrough), made from the real UI by `npm run guides:record` (`scripts/guides/record.mjs` + stand-in backend `mock.js`; needs `npm run dev`, `npm i --no-save playwright`, ffmpeg). Re-record after changing these screens.
 
 ### Pipeline step display
 Step labels/icons live in ONE registry: `src/lib/pipelineSteps.ts` (`PIPELINE_STEPS`, `getStepMeta`). Used by ThinkingBlock (chat) and TraceView. A new backend step = one entry there.
@@ -281,6 +286,7 @@ src/
     theme.ts                — light/dark theme management
     localModel.ts           — local model download state
     localServers.ts         — detected Ollama / LM Studio servers and their models
+    guides.ts               — welcome tour / add-model dialog visibility
     dictation.ts            — dictation model status, recording/transcribing phase
   lib/tauri.ts              — typed invoke wrappers for all Tauri commands
   lib/audio.ts              — mic recording + downsampling to 16 kHz
@@ -288,6 +294,8 @@ src/
   lib/shortcuts.ts          — keyboard shortcut registry
   lib/format.ts             — latency/cost/count formatting
   lib/providers.ts          — provider display names (e.g. "Local (offline)")
+  lib/providerPresets.ts    — provider presets + suggested model IDs (Settings and AddModelDialog)
+  lib/modelGuides.ts        — add-model guide registry (steps, recordings, cloud key pages)
   hooks/useShortcuts.ts, hooks/useAddDocument.ts
   components/
     common/TopBar.tsx         — top navigation bar with ConversationSwitcher + icon buttons
@@ -307,6 +315,7 @@ src/
     preview/TreeView.tsx, CanvasView.tsx, TraceView.tsx, RelationsView.tsx
     settings/SettingsModal.tsx — tabbed settings (Providers, Local AI, Appearance, Data)
     settings/LocalAISettings.tsx — enrichment + dictation model management
+    onboarding/WelcomeTour.tsx, AddModelDialog.tsx, GuideVideo.tsx — first-run tour + add-model guide
 ```
 
 ## DB Schema (V3 — current)

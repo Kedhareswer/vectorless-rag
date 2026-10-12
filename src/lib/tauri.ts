@@ -1,4 +1,5 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 // Types matching Rust structs
 
@@ -310,3 +311,7 @@ export const reenrichDocument = (docId: string) =>
 
 // Clear ALL app data (DB, model file, keychain). Frontend must reload after this.
 export const clearAppData = () => invoke<void>('clear_app_data');
+
+// ── External links ──
+/** Open a web page in the user's default browser. */
+export const openExternal = (url: string) => openUrl(url);

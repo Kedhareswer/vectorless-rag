@@ -13,11 +13,9 @@ import styles from './ModelDownloadDialog.module.css';
 
 interface ModelDownloadDialogProps {
   onClose: () => void;
-  /** When true, shows onboarding framing (first-run experience) */
-  isOnboarding?: boolean;
 }
 
-export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDialogProps) {
+export function ModelDownloadDialog({ onClose }: ModelDownloadDialogProps) {
   const [options, setOptions] = useState<ModelOption[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reenriching, setReenriching] = useState(false);
@@ -87,7 +85,7 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
         <div className={styles.header}>
           <Cpu size={18} />
           <h2 className={styles.title}>
-            {isOnboarding ? 'Welcome to TGG' : 'Offline Model'}
+            Offline Model
           </h2>
           <button type="button" className={styles.closeBtn} onClick={onClose}>
             <X size={16} />
@@ -95,9 +93,9 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
         </div>
 
         <p className={styles.description}>
-          {isOnboarding
-            ? 'Download one small model and TGG works fully offline: it answers your questions, improves search and summarises documents — all on this computer. Nothing is sent to any server. You can also connect a cloud provider later.'
-            : 'One model for everything offline: it answers questions (choose "Local (offline)" as the provider), improves search, and summarises document sections. It runs entirely on this computer.'}
+          One model for everything offline: it answers questions (choose "Local (offline)" as the
+          provider), improves search, and summarises document sections. It runs entirely on this
+          computer.
         </p>
 
         {status?.downloaded ? (
@@ -188,7 +186,7 @@ export function ModelDownloadDialog({ onClose, isOnboarding }: ModelDownloadDial
 
         <div className={styles.footer}>
           <button type="button" className={styles.cancelBtn} onClick={onClose}>
-            {status?.downloaded ? 'Close' : isOnboarding ? 'Skip for now' : 'Cancel'}
+            {status?.downloaded ? 'Close' : 'Cancel'}
           </button>
           {!status?.downloaded && !isDownloading && (
             <button

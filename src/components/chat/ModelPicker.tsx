@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, Server, Settings } from 'lucide-react';
+import { Check, ChevronDown, Plus, Server, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import { useSettingsStore } from '../../stores/settings';
 import { providerDisplayName, providerModelLabel } from '../../lib/providers';
 import { useLocalServersStore } from '../../stores/localServers';
+import { useGuidesStore } from '../../stores/guides';
 import styles from './ModelPicker.module.css';
 
 interface ModelPickerProps {
@@ -17,6 +18,7 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
   const activateProvider = useSettingsStore((s) => s.activateProvider);
   const selectServerModel = useSettingsStore((s) => s.selectServerModel);
   const servers = useLocalServersStore((s) => s.servers);
+  const openAddModel = useGuidesStore((s) => s.openAddModel);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -30,7 +32,16 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
   }, [open]);
 
   const active = providers.find((p) => p.id === activeProviderId);
-  if (!active) return null;
+  if (!active) {
+    return (
+      <div className={styles.wrap}>
+        <button type="button" className={styles.chip} onClick={() => openAddModel()} title="Add a model to answer with">
+          <Plus size={11} />
+          <span className={styles.chipText}>Add a model</span>
+        </button>
+      </div>
+    );
+  }
 
   // Installed models on local servers that aren't already a configured choice.
   const serverModels = servers.flatMap((server) =>
@@ -99,6 +110,18 @@ export function ModelPicker({ onOpenSettings }: ModelPickerProps) {
               ))}
             </>
           )}
+          <button
+            type="button"
+            role="menuitem"
+            className={clsx(styles.item, styles.manage)}
+            onClick={() => {
+              setOpen(false);
+              openAddModel();
+            }}
+          >
+            <Plus size={13} />
+            <span>Add a model…</span>
+          </button>
           <button
             type="button"
             role="menuitem"

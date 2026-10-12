@@ -12,6 +12,8 @@ import {
   Cpu,
   Database,
   TriangleAlert,
+  LifeBuoy,
+  PlayCircle,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -21,7 +23,10 @@ import { ModelDownloadDialog } from '../common/ModelDownloadDialog';
 import { LocalAISettings } from './LocalAISettings';
 import { providerDisplayName } from '../../lib/providers';
 import { useLocalServersStore } from '../../stores/localServers';
+import { useGuidesStore } from '../../stores/guides';
+import { MODEL_GUIDES, MODEL_PATH_ORDER } from '../../lib/modelGuides';
 import { clearAppData } from '../../lib/tauri';
+import { PROVIDER_MODELS, PROVIDER_PRESETS, type ProviderPreset } from '../../lib/providerPresets';
 import styles from './SettingsModal.module.css';
 
 /** Settings sections, in nav order. Add a section here and render it below. */
@@ -30,6 +35,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'local-ai', label: 'Local AI', icon: Cpu },
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'data', label: 'Data', icon: Database },
+  { id: 'help', label: 'Help', icon: LifeBuoy },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon }[];
 
 export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
@@ -39,145 +45,6 @@ interface SettingsModalProps {
   /** Section to open on. */
   initialSection?: SettingsSectionId;
 }
-
-type ProviderPreset =
-  | 'local'
-  | 'lmstudio'
-  | 'ollama'
-  | 'groq'
-  | 'google'
-  | 'openrouter'
-  | 'agentrouter'
-  | 'anthropic'
-  | 'openai'
-  | 'deepseek'
-  | 'xai'
-  | 'qwen'
-  | 'openai-compat';
-
-/** Suggested model IDs per provider. Any other ID can be typed in. */
-const PROVIDER_MODELS: Partial<Record<ProviderPreset, string[]>> = {
-  google: [
-    'gemini-2.5-flash',
-    'gemini-2.5-pro',
-    'gemini-2.0-flash',
-    'gemini-2.0-pro',
-  ],
-  anthropic: [
-    'claude-sonnet-5-5',
-    'claude-opus-5-5',
-    'claude-haiku-5-5',
-    'claude-haiku-4-5-20251001',
-    'claude-sonnet-4-6',
-    'claude-opus-4-6',
-  ],
-  openai: [
-    'gpt-4o-mini',
-    'gpt-4o',
-    'gpt-4.1-mini',
-    'gpt-4.1',
-    'o3-mini',
-    'o4-mini',
-  ],
-  deepseek: [
-    'deepseek-chat',
-    'deepseek-reasoner',
-  ],
-  xai: [
-    'grok-3-mini',
-    'grok-3',
-    'grok-4-fast-non-reasoning',
-    'grok-4-0709',
-  ],
-  qwen: [
-    'qwen-turbo',
-    'qwen-plus',
-    'qwen-max',
-    'qwq-plus',
-    'qwen3-coder-plus',
-  ],
-};
-
-const PROVIDER_PRESETS: Record<ProviderPreset, Omit<ProviderConfig, 'id' | 'isActive'>> = {
-  ollama: {
-    name: 'ollama',
-    apiKey: '',
-    baseUrl: 'http://localhost:11434',
-    model: 'llama3.2',
-  },
-  groq: {
-    name: 'groq',
-    apiKey: '',
-    baseUrl: 'https://api.groq.com/openai/v1',
-    model: 'llama-3.3-70b-versatile',
-  },
-  google: {
-    name: 'google',
-    apiKey: '',
-    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    model: 'gemini-2.5-flash',
-  },
-  openrouter: {
-    name: 'openrouter',
-    apiKey: '',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'anthropic/claude-sonnet-4-6',
-  },
-  agentrouter: {
-    name: 'agentrouter',
-    apiKey: '',
-    baseUrl: 'https://agentrouter.org/v1',
-    model: 'claude-sonnet-4-5-20250514',
-  },
-  anthropic: {
-    name: 'anthropic',
-    apiKey: '',
-    baseUrl: 'https://api.anthropic.com/v1',
-    model: 'claude-haiku-4-5-20251001',
-  },
-  openai: {
-    name: 'openai',
-    apiKey: '',
-    baseUrl: 'https://api.openai.com/v1',
-    model: 'gpt-4o-mini',
-  },
-  deepseek: {
-    name: 'deepseek',
-    apiKey: '',
-    baseUrl: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
-  },
-  xai: {
-    name: 'xai',
-    apiKey: '',
-    baseUrl: 'https://api.x.ai/v1',
-    model: 'grok-3-mini',
-  },
-  qwen: {
-    name: 'qwen',
-    apiKey: '',
-    baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen-turbo',
-  },
-  'openai-compat': {
-    name: 'openai-compat',
-    apiKey: '',
-    baseUrl: '',
-    model: '',
-  },
-  lmstudio: {
-    name: 'lmstudio',
-    apiKey: '',
-    baseUrl: 'http://localhost:1234/v1',
-    model: '',
-  },
-  local: {
-    name: 'local',
-    apiKey: '',
-    baseUrl: '',
-    model: 'on-device',
-  },
-};
 
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -197,6 +64,7 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
 
   const { theme, setTheme } = useThemeStore();
   const { servers, detecting, detect } = useLocalServersStore();
+  const { openTour, openAddModel } = useGuidesStore();
 
   // Look for Ollama / LM Studio so installed models can be offered.
   useEffect(() => {
@@ -425,7 +293,17 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
               <>
                 <p className={styles.sectionDesc}>
                   The model that writes answers. API keys are stored in your OS keychain. The active
-                  provider can also be switched from the chat box.
+                  provider can also be switched from the chat box.{' '}
+                  <button
+                    type="button"
+                    className={styles.inlineLink}
+                    onClick={() => {
+                      onClose();
+                      openAddModel();
+                    }}
+                  >
+                    Show me how to add one
+                  </button>
                 </p>
             <div className={styles.providerCards}>
               {draftProviders.map((provider) => (
@@ -616,6 +494,48 @@ export function SettingsModal({ onClose, initialSection = 'providers' }: Setting
                     </button>
                   ))}
                 </div>
+              </>
+            )}
+
+            {section === 'help' && (
+              <>
+                <p className={styles.sectionDesc}>Short guides with screen recordings.</p>
+                <div className={styles.helpCard}>
+                  <div className={styles.helpText}>
+                    <strong>Welcome tour</strong>
+                    <span>What TGG does, why it needs a model, and the ways to get one.</span>
+                  </div>
+                  <button
+                    type="button"
+                    className={styles.cancelButton}
+                    onClick={() => {
+                      onClose();
+                      openTour();
+                    }}
+                  >
+                    <PlayCircle size={14} />
+                    <span>Show tour</span>
+                  </button>
+                </div>
+                {MODEL_PATH_ORDER.map((id) => (
+                  <div key={id} className={styles.helpCard}>
+                    <div className={styles.helpText}>
+                      <strong>Add a model: {MODEL_GUIDES[id].title.toLowerCase()}</strong>
+                      <span>{MODEL_GUIDES[id].summary}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.cancelButton}
+                      onClick={() => {
+                        onClose();
+                        openAddModel(id);
+                      }}
+                    >
+                      <PlayCircle size={14} />
+                      <span>Watch how</span>
+                    </button>
+                  </div>
+                ))}
               </>
             )}
 

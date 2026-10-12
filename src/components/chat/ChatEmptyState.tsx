@@ -1,4 +1,4 @@
-import { Check, Cloud, Cpu, FileText, HardDrive, LoaderCircle, MessageSquareText, Plus, Server } from 'lucide-react';
+import { Check, Cpu, FileText, HardDrive, LoaderCircle, MessageSquareText, Plus, Server } from 'lucide-react';
 import clsx from 'clsx';
 import styles from './ChatEmptyState.module.css';
 
@@ -11,8 +11,9 @@ interface ChatEmptyStateProps {
   onUseLocalServer?: () => void;
   docNames: string[];
   isIngesting: boolean;
-  onOpenSettings: () => void;
-  /** Answer with the offline model (adds the provider, offers the download). */
+  /** Open the "Add a model" guide. */
+  onAddModel: () => void;
+  /** Download the offline model (when it is selected but missing). */
   onUseOffline: () => void;
   onAddDocument: () => void;
   onFocusInput: () => void;
@@ -42,7 +43,7 @@ export function ChatEmptyState({
   onUseLocalServer,
   docNames,
   isIngesting,
-  onOpenSettings,
+  onAddModel,
   onUseOffline,
   onAddDocument,
   onFocusInput,
@@ -84,16 +85,15 @@ export function ChatEmptyState({
       detail: localModelMissing
         ? 'One ~700 MB download, then everything runs on this computer.'
         : localServer
-          ? `${localServer.label} is running on this computer — answer with ${localServer.model}, no download needed. Or use the built-in offline model, or a cloud provider.`
-          : 'Offline on this computer (one ~700 MB download, private and free), or a cloud provider like Anthropic or OpenAI for the strongest answers.',
+          ? `${localServer.label} is running on this computer — answer with ${localServer.model}, no download needed.`
+          : 'A model writes the answer from the passages TGG finds. Use one you already have, the built-in offline model, or a cloud provider.',
       actions: localModelMissing
         ? [{ label: 'Download', onClick: onUseOffline, icon: HardDrive }]
         : [
             ...(localServer && onUseLocalServer
               ? [{ label: `Use ${localServer.label} model`, onClick: onUseLocalServer, icon: Cpu }]
               : []),
-            { label: localServer ? 'Built-in offline model' : 'Use offline model', onClick: onUseOffline, icon: HardDrive },
-            { label: 'Cloud provider', onClick: onOpenSettings, icon: Cloud },
+            { label: localServer ? 'Other options' : 'Add a model', onClick: onAddModel, icon: Plus },
           ],
     },
     {
