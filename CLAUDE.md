@@ -95,7 +95,7 @@ React Frontend ←→ Tauri IPC (invoke) ←→ Rust Backend
 - **Desktop shell**: Tauri v2 (Rust backend + WebView frontend)
 - **Frontend**: React 19 + TypeScript 7 + Vite 8 (Vitest 5, Node 24 LTS in CI; Node ≥22.22.2 locally)
 - **Backend**: Rust, edition 2024 (Tokio async runtime)
-- **Database**: SQLite via `rusqlite` (document trees, traces, settings) — schema at V3
+- **Database**: SQLite via `rusqlite` (document trees, traces, settings, batch jobs) — schema at V4
 - **Styling**: CSS custom properties + CSS modules, Inter font, JetBrains Mono for code
 - **State management**: Zustand stores (chat, documents, settings, theme, localModel)
 
@@ -124,7 +124,7 @@ Every document is parsed into a uniform tree:
 Node { id, node_type, content, metadata, children, relations }
 ```
 - Type-specific parsers in `document/parser.rs` output into this same schema
-- **PDF parser**: native LiteParse crate (PDFium; layout blocks → Section/Paragraph/ListItem/Table/CodeBlock with page numbers) → fallback to pdf-extract when PDFium is missing or a page has no text (no OCR compiled in). The pdf-extract fallback uses 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
+- **PDF parser**: native LiteParse crate (PDFium; layout blocks → Section/Paragraph/ListItem/Table/CodeBlock with page numbers) → a document with no text layer is parsed again with the oar-ocr ONNX backend (`ocr_engine` in `document/liteparse.rs`), which needs `onnxruntime.dll` in `resources/` and otherwise errors out fast → fallback to pdf-extract when PDFium is missing or OCR is unavailable. The pdf-extract fallback uses 7 heading strategies: `SECTION_KEYWORDS` (~40 common headings) + all-caps + numbered + title-case + two-pass line splitting + SLM classification for ambiguous lines
 - **Image extraction**: lopdf extracts embedded JPEG/PNG/raw images; positioned as ImageNode in tree (no visual analysis)
 - Metadata fields: `summary`, `entities`, `topics`, `page_number`, `word_count`
 
@@ -175,7 +175,7 @@ Intent → fetch strategy:
 ## Known Limitations
 - **Local model**: ONE download does all local work (enrichment, metadata, and answers via the `local` provider): Liquid LFM2.5-1.2B-Instruct QAD Q4_0 (~700 MB; Liquid's recommended successor to the deprecated LFM2-1.2B-RAG). LFM2.5-230M (~150 MB) is offered for low-memory PCs — enrichment only, too small for reliable answers. Local answers are slower (CPU) and simpler than large cloud models.
 - **PDF image analysis**: Images are extracted and positioned in the tree (lopdf), but their visual content is not analyzed (would require a multimodal model).
-- **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. Scanned PDFs need OCR, which is not compiled in (tesseract / oar-ocr features are heavy).
+- **LiteParse / PDFium**: PDFium is a shared library downloaded by `liteparse-pdfium-sys` at build time; `build.rs` copies it to `src-tauri/resources/` (gitignored) and Tauri bundles it. OCR: `oar-ocr-auto-download` is on, models (PP-OCRv6 small, ~31 MB) download to `~/.oar` on first use. `ort` is `load-dynamic` because pyke's prebuilt onnxruntime.lib uses the static MSVC CRT and cannot link next to PDFium (LNK2005 / LNK1319); a dynamic-CRT `onnxruntime.dll` (Microsoft release) must be placed in `resources/` — not bundled yet, so scanned PDFs still fall back. `Cargo.lock` pins `ort` to 2.0.0-rc.12 (rc.13 breaks oar-ocr 0.8).
 
 - **Dictation platforms**: release builds target Windows (WebView2 asks for mic permission). macOS would need `NSMicrophoneUsageDescription`; Linux WebKitGTK may not expose `getUserMedia`.
 
@@ -222,7 +222,7 @@ Step labels/icons live in ONE registry: `src/lib/pipelineSteps.ts` (`PIPELINE_ST
 | `llm_call` | Generated answer | Cpu |
 
 ### Keyboard shortcuts (`src/lib/shortcuts.ts` → `useShortcuts`)
-`mod` = ⌘ on macOS, Ctrl elsewhere: mod+N new chat · mod+K switch chat · mod+D documents · mod+J trace · mod+, settings · `/` focus input. Tooltips get hints from the same registry (`withShortcut`).
+`mod` = ⌘ on macOS, Ctrl elsewhere: mod+N new chat · mod+K switch chat · mod+D documents · mod+J trace · mod+B batch questions · mod+, settings · `/` focus input. Tooltips get hints from the same registry (`withShortcut`).
 
 ### Color Tokens
 ```
@@ -275,7 +275,8 @@ src-tauri/src/
     groq.rs, google.rs, openrouter.rs
 
   db/
-    schema.rs               — SQLite schema V3, migrations, all CRUD queries
+    schema.rs               — SQLite schema V4, migrations, all CRUD queries
+    batches.rs              — batch_jobs / batch_items queries (provider Batch API)
     traces.rs               — trace-specific queries
 
 src/
@@ -318,11 +319,14 @@ src/
     onboarding/WelcomeTour.tsx, AddModelDialog.tsx, GuideVideo.tsx — first-run tour + add-model guide
 ```
 
-## DB Schema (V3 — current)
+## DB Schema (V4 — current)
 ```sql
 documents (id, name, doc_type, tree_json, created_at)
 conversations (id, title, doc_id, created_at)
 conversation_documents (conv_id, doc_id, added_at)   -- V3: per-chat doc scoping
+batch_jobs (id, conv_id, provider_id, provider_batch_id, status, created_at,
+            ended_at, results_fetched)               -- V4: provider Batch API
+batch_items (job_id, custom_id, question, answer, error, input_tokens, output_tokens)
 messages (id, conv_id, role, content, created_at)
 traces (id, conv_id, provider_name, total_tokens, total_cost, total_latency_ms,
         steps_count, created_at, input_tokens, output_tokens)
