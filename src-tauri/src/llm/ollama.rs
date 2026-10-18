@@ -169,6 +169,7 @@ impl LLMProvider for OllamaProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 
@@ -248,6 +249,7 @@ impl LLMProvider for OllamaProvider {
             tokens_used: input_tokens + output_tokens,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 

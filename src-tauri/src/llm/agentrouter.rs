@@ -244,6 +244,7 @@ impl LLMProvider for AgentRouterProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 

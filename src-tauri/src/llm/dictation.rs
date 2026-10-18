@@ -241,8 +241,10 @@ fn mel_filters(num_mel_bins: usize) -> Result<Vec<f32>, String> {
         return Err(format!("Unsupported mel bin count: {}", num_mel_bins));
     }
     Ok(MEL_FILTERS_80
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect())
 }
 

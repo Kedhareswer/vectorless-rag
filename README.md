@@ -1,97 +1,88 @@
+<div align="center">
+
 # TGG — Tree-Grounded Generation
 
-**A desktop application for document question-answering without embeddings, vector databases, or chunking.**
+**Ask questions about your documents — without embeddings, vector databases, or chunking.**
 
-Documents are parsed into structured trees. A deterministic fetcher navigates them based on enriched search terms — rather than retrieving decontextualized fragments by cosine similarity — then a single streaming LLM call generates the grounded answer.
+Documents are parsed into trees. A deterministic fetcher walks the tree to the right sections, and one streaming LLM call writes an answer grounded in what it read. Every step is shown as it happens.
 
+[![CI](https://github.com/Kedhareswer/vectorless-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/Kedhareswer/vectorless-rag/actions/workflows/ci.yml)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8?style=flat-square&logo=tauri&logoColor=white)](https://v2.tauri.app)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
-[![Rust](https://img.shields.io/badge/Rust-DEA584?style=flat-square&logo=rust&logoColor=black)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/Rust-2024-DEA584?style=flat-square&logo=rust&logoColor=black)](https://www.rust-lang.org)
 [![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white)](https://sqlite.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
+<img src="docs/media/demo.gif" alt="TGG answering a question about a contract: the query is rewritten, the tree is searched and read, then the answer streams with section citations" width="860">
+
+<sub>Add a document, ask a question — the pipeline steps appear live, then the answer cites the sections it came from (§9.1, §9.4).</sub>
+
+</div>
+
 ---
 
-## The Problem with Traditional RAG
+## Why not regular RAG?
 
-Traditional RAG pipelines follow the same pattern: split documents into fixed-size chunks, embed each chunk into a vector, retrieve the top-K chunks by cosine similarity, and pass them to an LLM.
+Traditional RAG splits documents into fixed-size chunks, embeds them, and retrieves the top-k by cosine similarity. What gets thrown away is exactly what makes a document readable: its structure.
 
-The fundamental problem is what gets destroyed in the process. Take a structured document:
+<p align="center">
+  <img src="docs/media/tree-vs-chunks.svg" alt="Chunked RAG returns shuffled fragments with no headings; TGG walks from §3 Authentication to §3.1 Token Types, reads the token table, and follows the cross-reference to §3.3 Refresh Flow" width="860">
+</p>
 
-```
-§3  Authentication
- ├── §3.1  Token Types
- │    ├── Bearer   — expires in 24h  — read/write access
- │    ├── Refresh  — expires in 30d  — read-only
- │    └── API Key  — never expires   — configurable scope
- ├── §3.2  Authorization
- │    └── Role-based access control (references §3.1)
- └── §3.3  Refresh Flow
-      └── Step-by-step token renewal (referenced from §3.1)
-```
-
-After chunking and embedding, the LLM receives something like this:
-
-```
-chunk_1:  "Bearer expires in 24h read/write access Refresh expires in 30d read-only..."
-chunk_2:  "authentication tokens are issued upon login the refresh flow handles renewal..."
-chunk_3:  "step 1 call the refresh endpoint with the current refresh token step 2..."
-```
-
-The heading hierarchy is gone. The table structure collapsed into a string. The cross-reference from §3.1 to §3.3 points nowhere.
-
-| What gets destroyed | Effect on the LLM |
+| What chunking destroys | Effect on the answer |
 | :--- | :--- |
-| Heading hierarchy | Sections have no context — a paragraph floats with no parent |
-| Table structure | Rows and columns become an undifferentiated string |
-| Cross-references | "See §3.3" and "See Figure 5" are dead ends |
-| Document boundaries | Chunks from unrelated documents appear in the same answer |
-| Code structure | Functions are detached from their class and module |
+| Heading hierarchy | A paragraph floats with no parent section |
+| Table structure | Rows and columns collapse into one string |
+| Cross-references | "See §3.3" points nowhere |
+| Document boundaries | Fragments from unrelated documents mix |
+| Code structure | Functions detach from their class and module |
 
----
-
-## How TGG Works
-
-TGG replaces the retrieval pipeline with a deterministic fetch step that navigates document structure directly, guided by LLM-powered query enrichment.
+TGG keeps the tree and reads it the way a person would:
 
 | Stage | Traditional RAG | TGG |
 | :--- | :--- | :--- |
-| **Ingest** | Split into fixed-size text chunks | Parse into a structured tree of typed nodes |
-| **Index** | Embed every chunk, store in vector DB | Store the tree in local SQLite — no embedding |
-| **On query** | Embed query, run cosine similarity search | Enrich query with 3 LLM calls (rewrite, HyDE, StepBack) |
-| **Retrieval** | Return top-K chunks ranked by similarity | Deterministic fetch: code decides what to read based on intent + enriched terms |
-| **Context** | Decontextualized fragments injected into prompt | Exactly the right nodes, structured by document hierarchy |
-| **Answer** | LLM generates from shuffled fragments | One streaming LLM call — reads and answers |
-| **Explainability** | No record of why a chunk was retrieved | Full trace of every fetch step with tokens and latency |
-
-### Query Pipeline (9 phases)
-
-```
-Phase 1  Heuristic preprocess — classify intent, extract search terms
-Phase 3  Query enrichment (3 LLM calls)
-         • Query Rewrite  — search-optimized reformulation
-         • HyDE           — hypothetical answer passage, extract terms
-         • StepBack       — broader question, extract background terms
-Phase 4  Deterministic fetch — code reads the right tree nodes
-Phase 5  Cross-doc relation discovery (if multiple docs)
-Phase 8  ONE streaming LLM call — no tools, reads and answers
-Phase 9  Save full trace
-```
-
-Every step is shown in real time as a thinking block in the chat panel.
+| **Ingest** | Split into fixed-size chunks | Parse into a tree of typed nodes |
+| **Index** | Embed every chunk into a vector DB | Store the tree in local SQLite — no embeddings |
+| **Query** | Embed the query, cosine top-k | Enrich the query (rewrite, HyDE, step-back) |
+| **Retrieve** | Top-k fragments by similarity | Deterministic walk: code picks nodes by intent + terms |
+| **Context** | Decontextualized fragments | Whole sections, in document order, with headings |
+| **Answer** | LLM over shuffled fragments | One streaming call — no tools, no agent loop |
+| **Explain** | No record of why a chunk was picked | Full trace of every step, with tokens and cost |
 
 ---
 
-## Universal Document Tree
+## How it works
 
-Every supported format is parsed into the same tree schema:
+```mermaid
+flowchart LR
+    Q([Question]) --> P[Preprocess<br/>intent + search terms]
+    P --> E{{Local enrichment<br/>rewrite · HyDE · step-back}}
+    E --> F[Deterministic fetch<br/>walk the tree]
+    T[(Document trees<br/>SQLite)] --> F
+    F --> R[Cross-doc relations<br/>with several documents]
+    R --> L[One streaming LLM call<br/>no tools]
+    H[(Chat history)] --> L
+    L --> A([Grounded answer])
+    L -.-> TR[(Trace<br/>tokens · cost · latency)]
+```
+
+1. **Preprocess** — a fast heuristic classifies intent (summarize, factual, comparison, list…) and extracts search terms. No model call.
+2. **Enrich** — a small model running *inside the app* rewrites the query, writes a hypothetical answer (HyDE) and a broader step-back question, harvesting extra terms that match the document's vocabulary. Free and offline; skipped if no local model is installed.
+3. **Fetch** — plain code decides what to read: expand top-level sections to summarize, follow matching nodes for facts, pull tables and lists for extraction. Capped at 40,000 characters.
+4. **Relate** — with several documents in a chat, shared entities and overlapping topics are linked and handed to the model.
+5. **Answer** — one streaming call to the model you chose. **The model never gets tools and never loops.** It reads what was fetched and answers.
+6. **Trace** — every step is saved with its tokens, cost and latency.
+
+### The Universal Document Tree
+
+Every format parses into the same schema, so the fetcher never needs to know where a document came from:
 
 ```rust
 Node {
     id:        String,
-    node_type: NodeType,   // Section | Paragraph | Table | Row | CodeBlock | Image | ...
+    node_type: NodeType,   // Section | Paragraph | Table | TableRow | ListItem | CodeBlock | Image | …
     content:   String,
-    metadata:  Metadata,   // page, word count, entities, topics, heading level, ...
+    metadata:  Metadata,   // page, word count, summary, entities, topics, heading level …
     children:  Vec<Node>,
     relations: Vec<Relation>,
 }
@@ -99,7 +90,7 @@ Node {
 
 | Format | Extensions | Parsed structure |
 | :--- | :--- | :--- |
-| PDF | `.pdf` | Pages → sections (heuristic heading detection) → paragraphs |
+| PDF | `.pdf` | Layout-aware via PDFium (LiteParse): headings, paragraphs, lists, tables, code — with page numbers |
 | Word | `.docx` | Heading styles → paragraphs → nested tables |
 | Markdown | `.md` `.markdown` | Full GFM — headings, code blocks, lists, images, links |
 | Spreadsheet | `.xlsx` `.xls` `.ods` | Sheets → rows → typed cells |
@@ -109,145 +100,164 @@ Node {
 
 ---
 
-## LLM Providers
+## Features
 
-TGG implements a unified `LLMProvider` trait in Rust. Streaming, retry, and cost tracking work identically across all providers.
+**Grounded, explainable answers** — every step (rewrite, HyDE, step-back, search, read, answer) appears live under your question and folds away when done. The Trace panel shows tokens, latency and cost per step.
+
+**Documents belong to chats** — each conversation has its own documents. The same file can sit in several chats without being stored twice.
+
+**Multi-document reasoning** — shared entities and topic overlap between documents are discovered automatically and given to the model.
+
+**Bring any model** — answer with a cloud provider, a model already running in Ollama or LM Studio (detected automatically), or the built-in offline model.
+
+**Fully offline mode** — one ~700 MB download (Liquid LFM2.5-1.2B) handles query enrichment, document summaries *and* answers, on the CPU, with nothing leaving your machine.
+
+**Prompt caching** — the fetched document content is marked as a cache breakpoint for Anthropic models, so follow-up questions in a chat re-read it at a tenth of the input price. Cache reads and writes are costed separately in the trace.
+
+**Prompt-injection guardrails** — document text is treated as untrusted data: it is fenced in the prompt, forged fence markers are stripped, and the model is told that instructions inside a document are content to report on, not commands to follow.
+
+**Batch work**
+- *Add many documents at once* — multi-select in the file picker or drop several files onto the window; they are parsed one after another with progress, and one bad file doesn't stop the rest.
+- *Re-enrich all* — regenerate summaries, entities and topics for every document in a chat in one pass, with the model loaded once.
+- *Batch questions* — submit up to 50 questions over a chat's documents through the Anthropic Message Batches API at half the price. Each question runs the same enrich → fetch pipeline; answers arrive within 24 hours (usually minutes).
+
+**Offline dictation** — the mic button transcribes speech with Whisper (tiny.en, ~42 MB) entirely on-device.
+
+**Interactive tree view** — explore each document's structure, filter nodes, and inspect metadata.
+
+**Local-first** — trees, chats and traces live in SQLite in your app-data folder. API keys go in the OS keychain. No telemetry.
+
+---
+
+## Models
+
+All providers share one Rust `LLMProvider` trait with streaming, automatic retry on transient errors, and per-model cost tracking.
 
 | Provider | Models | Notes |
 | :--- | :--- | :--- |
-| **Anthropic** | Claude 4.6 Sonnet/Opus, 4.5 Haiku | Native SSE streaming |
+| **Anthropic** | Claude Sonnet, Opus, Haiku | Native SSE streaming · prompt caching · Batch API |
 | **OpenAI** | GPT-4o, GPT-4.1, o1, o3, o4-mini | |
 | **Google AI Studio** | Gemini 2.5 Pro, 2.5 Flash | Vision-capable |
-| **Groq** | Llama 3.3-70B, Mixtral 8x7B | Fast inference |
+| **Groq** | Llama 3.3 70B, Mixtral | Fast inference |
 | **DeepSeek** | DeepSeek Chat, DeepSeek Reasoner | |
 | **xAI** | Grok 3, Grok 3 Mini | |
-| **Qwen** | Qwen Max, Qwen Plus, Qwen Turbo | |
-| **OpenRouter** | 100+ models | Single key for Claude, GPT, Llama, Mistral, and more |
-| **AgentRouter** | GPT-5, DeepSeek, GLM | Automatic model routing |
-| **Ollama** | Any locally-served model | Token streaming; requests a 16k context |
-
-Per-token pricing is embedded for 40+ models. Every query shows exact input/output token counts with cost.
-
----
-
-## Observability
-
-Every query produces a structured trace stored in local SQLite — no external service required.
-
-```
-Query     "What are the token expiry rules?"
-Provider  claude-sonnet-4-6
-Result    6 steps · 2,398 tokens · $0.0078 · 6.6s
-
-  #   Step                  Input tokens   Output tokens   Latency   Cost
-  ─   ──────────────────    ────────────   ─────────────   ───────   ──────
-  1   query_rewrite                  220              45     0.7s   $0.0004
-  2   hyde                           198              89     1.1s   $0.0008
-  3   stepback                       180              62     0.9s   $0.0006
-  4   search (3 terms)               —                —      0.0s   —
-  5   expand (§3.1, §3.3)            —                —      0.0s   —
-  6   llm_call                     1,800             660     3.9s   $0.0060
-  ─   ──────────────────    ────────────   ─────────────   ───────   ──────
-      Total                        2,398           1,029     6.6s   $0.0078
-```
-
----
-
-## Features
-
-**Deterministic pipeline** — Query enrichment followed by code-driven content fetch. Real-time thinking blocks in the chat panel show each step as it happens.
-
-**Persistent conversations** — Chat history stored in SQLite, resumed automatically. Up to 8,000 tokens of prior context loaded per query.
-
-**Multi-document queries** — Multiple documents per conversation. Cross-document relations (shared entities, topic overlap) discovered automatically and injected into context.
-
-**Interactive tree visualization** — The preview panel renders the document tree as an interactive SVG canvas with zoom, pan, and click-to-inspect. Nodes are color-coded by type.
-
-**Query cancellation** — An in-flight query can be cancelled via an `Arc<AtomicBool>` flag checked at three points in the pipeline.
-
-**Local-first** — All data in SQLite in the system app data directory. No telemetry, no cloud dependency. Documents do not leave the machine.
-
-**Layout-aware PDF parsing** — The native LiteParse engine (PDFium) turns each page into headings, paragraphs, lists, tables and code, mapped straight into the document tree with page numbers.
-
-**Small local models** — Optional ~150 MB Liquid LFM2.5 model for offline query enrichment, run in-process on the CPU.
-
-**Offline dictation** — Mic button in the chat box transcribes speech with Whisper (tiny.en, ~42 MB) entirely on-device.
-
-**Light and dark themes** — System preference detected automatically with a manual override via CSS custom properties.
+| **Qwen** | Qwen Max, Plus, Turbo | |
+| **OpenRouter** | 100+ models | One key for many vendors |
+| **AgentRouter** | GPT-5, DeepSeek, GLM | Automatic routing |
+| **Ollama** | Any local model | Detected automatically; 16k context requested |
+| **LM Studio** | Any loaded model | Detected automatically; no API key |
+| **Local (offline)** | LFM2.5-1.2B-Instruct | Runs inside the app; cost is always 0 |
 
 ---
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    subgraph UI["React 19 · WebView"]
+        direction LR
+        C[Chat + live steps]
+        D[Documents panel<br/>tree view]
+        B[Batch panel]
+        TP[Trace panel]
+    end
+
+    C <-->|Tauri IPC<br/>invoke + channels| PL
+
+    subgraph Core["Rust backend · Tokio"]
+        direction LR
+        PL[Query pipeline<br/>preprocess · enrich · fetch · answer]
+        DE[Document engine<br/>parsers · tree · metadata]
+        SLM[In-process SLM<br/>candle GGUF · Whisper]
+        LLM[Provider layer<br/>12 backends + retry]
+        DB[(SQLite<br/>trees · chats · traces · batches)]
+    end
+
+    PL --> DE
+    PL --> SLM
+    PL --> LLM
+    PL --> DB
+    DE --> DB
 ```
-React 19 + TypeScript (Vite)
-
-Sidebar          Chat Panel        Preview Panel
-Documents        Messages          Tree / Graph
-Conversations    Thinking blocks   Trace timeline
-Settings         Streaming         Cost breakdown
-
-         Tauri IPC  (invoke + channels)
-                    |
-Rust + Tokio
-
-  Query Pipeline (chat_handler.rs)
-  Query preprocessing · 3 enrichment calls
-  Deterministic fetch · Single streaming call
-  Cancellation (Arc<AtomicBool>)
-        |                    |
-  Document Engine      LLM Layer          SQLite (WAL)
-  7 parsers            10 providers       documents
-  Tree builder         40+ models         messages
-  Metadata                                traces
-  Relations
-```
-
-### Stack
 
 | Layer | Technology |
 | :--- | :--- |
 | Desktop shell | Tauri v2 |
-| Frontend | React 19, TypeScript 7, Vite 8, Vitest 5 |
-| Backend | Rust (edition 2024), Tokio async runtime |
-| Database | SQLite via `rusqlite`, WAL mode |
-| State management | Zustand v5 |
-| Styling | CSS Modules, CSS custom properties |
-| Markdown rendering | `react-markdown`, `remark-gfm`, `rehype-sanitize` |
+| Frontend | React 19, TypeScript 7, Vite 8, Zustand 5, CSS Modules |
+| Backend | Rust (edition 2024), Tokio |
+| Local inference | candle (GGUF LFM2.5 / Qwen2 / Llama, Whisper) |
+| PDF | LiteParse + PDFium, pdf-extract fallback |
+| Storage | SQLite via `rusqlite` (WAL), OS keychain via `keyring` |
+| Markdown | `react-markdown`, `remark-gfm`, `rehype-sanitize` |
 
 ---
 
-## Getting Started
+## Getting started
 
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) 24 LTS (or 22.22.2+)
-- [Rust](https://rustup.rs/) stable toolchain
-- Platform build tools — see [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+- [Rust](https://rustup.rs/) stable (1.95+)
+- Platform build tools — see [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/). On Windows: Visual Studio Build Tools with the **C++ workload**, and the WebView2 runtime (preinstalled on Windows 11).
 
-### Development
+### Run it
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-### Production Build
+The first build compiles ~700 crates and downloads PDFium, so give it several minutes. Later builds are incremental.
+
+### Build an installer
 
 ```bash
 npm run tauri build
 ```
 
-Output is placed in `src-tauri/target/release/bundle/`. Produces `.msi` / `.exe` on Windows, `.dmg` on macOS, and `.deb` / `.AppImage` on Linux.
+Output lands in `src-tauri/target/release/bundle/` — `.msi` / `.exe` on Windows, `.dmg` on macOS, `.deb` / `.AppImage` on Linux.
 
-### First Steps
+### First steps
 
-1. Open **Settings** and add an LLM provider — paste an API key and select a model.
-2. Click **+** in the sidebar to start a new conversation and upload a document.
-3. Ask a question. The pipeline will enrich the query, fetch the relevant tree nodes, and return a grounded answer.
+1. **Pick how to answer.** The setup checklist offers a model already in Ollama or LM Studio, the built-in offline model, or a cloud API key.
+2. **Add documents** with **+ Add** in the message box, or drop files onto the window. Select several at once to add them in one go.
+3. **Ask.** Watch the steps, read the answer, open **Trace** to see what it cost.
+
+### Keyboard shortcuts
+
+`Ctrl` on Windows/Linux, `⌘` on macOS.
+
+| Shortcut | Action |
+| :--- | :--- |
+| `Ctrl+N` | New chat |
+| `Ctrl+K` | Switch chat |
+| `Ctrl+D` | Documents panel |
+| `Ctrl+J` | Trace panel |
+| `Ctrl+B` | Batch questions panel |
+| `Ctrl+,` | Settings |
+| `/` | Focus the message box |
+
+### Tests
+
+```bash
+npm test                         # frontend (Vitest)
+npx tsc --noEmit                 # type check
+cd src-tauri && cargo test --lib # backend
+```
+
+---
+
+## Known limitations
+
+- **Scanned PDFs** — image-only pages have no text layer. An ONNX OCR backend is wired in, but it needs an ONNX Runtime library built for the dynamic MSVC runtime, which is not bundled yet; until then such pages fall back to a "no extractable text" placeholder.
+- **Images in documents** are extracted and placed in the tree, but their content is not analyzed.
+- **Batch questions** use the Anthropic Message Batches API only. Batched questions are answered independently, without chat history.
+- **Prompt caching** applies to Anthropic models. Caching rewards a repeated prefix, so it pays off on follow-ups that fetch the same sections, not across unrelated questions.
+- **The offline model** is slower and simpler than large cloud models. The 230M variant (~150 MB) is offered for low-memory machines, for enrichment only.
+- **Dictation** targets Windows release builds; macOS and Linux microphone access is not configured.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)

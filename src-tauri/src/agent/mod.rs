@@ -2,6 +2,7 @@ pub mod query;
 pub mod events;
 pub mod chat_handler;
 pub mod deterministic;
+pub mod batch;
 
 pub use query::{preprocess_query, ProcessedQuery, QueryIntent, EnrichmentResult, rewrite_query, generate_hyde, stepback_query, extract_terms_from_text};
 pub use chat_handler::run_agent_chat;

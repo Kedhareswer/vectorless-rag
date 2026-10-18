@@ -1,4 +1,4 @@
-import { ChevronDown, FileText, Activity, Settings, SquarePen } from 'lucide-react';
+import { ChevronDown, FileText, Activity, ListChecks, Settings, SquarePen } from 'lucide-react';
 import clsx from 'clsx';
 import { withShortcut } from '../../lib/shortcuts';
 import styles from './TopBar.module.css';
@@ -13,6 +13,8 @@ interface TopBarProps {
   onDocsToggle: () => void;
   tracePanelOpen: boolean;
   onTraceToggle: () => void;
+  batchPanelOpen: boolean;
+  onBatchToggle: () => void;
   onSettingsClick: () => void;
 }
 
@@ -26,6 +28,8 @@ export function TopBar({
   onDocsToggle,
   tracePanelOpen,
   onTraceToggle,
+  batchPanelOpen,
+  onBatchToggle,
   onSettingsClick,
 }: TopBarProps) {
   return (
@@ -81,6 +85,18 @@ export function TopBar({
         >
           <Activity size={15} />
           <span className={styles.btnText}>Trace</span>
+        </button>
+
+        <button
+          type="button"
+          className={clsx(styles.labelBtn, batchPanelOpen && styles.btnActive)}
+          onClick={onBatchToggle}
+          title={withShortcut('Batch questions', 'batch')}
+          aria-label="Batch"
+          aria-pressed={batchPanelOpen}
+        >
+          <ListChecks size={15} />
+          <span className={styles.btnText}>Batch</span>
         </button>
 
         <div className={styles.divider} />

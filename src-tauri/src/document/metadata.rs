@@ -18,6 +18,27 @@ const MIN_CONTENT_LEN: usize = 50;
 /// Maximum content length to feed to the summarizer.
 const MAX_CONTENT_FOR_SUMMARY: usize = 2000;
 
+/// Clear the metadata on a tree's top-level nodes and enrich them again.
+///
+/// `enrich_tree_metadata` skips nodes that already have a summary, so a plain
+/// call would leave existing (often heuristic-only) metadata untouched; this is
+/// what "re-enrich" means. Returns the number of nodes enriched.
+pub fn reenrich_tree(tree: &mut DocumentTree) -> usize {
+    let root_id = tree.root_id.clone();
+    let child_ids: Vec<String> = tree
+        .get_node(&root_id)
+        .map(|r| r.children.clone())
+        .unwrap_or_default();
+    for child_id in &child_ids {
+        if let Some(node) = tree.nodes.get_mut(child_id) {
+            node.summary = None;
+            node.metadata.remove("entities");
+            node.metadata.remove("topics");
+        }
+    }
+    enrich_tree_metadata(tree)
+}
+
 /// Enrich a document tree's top-level nodes with metadata.
 /// Modifies the tree in-place. Returns the number of nodes enriched.
 pub fn enrich_tree_metadata(tree: &mut DocumentTree) -> usize {

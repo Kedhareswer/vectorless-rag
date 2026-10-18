@@ -8,6 +8,7 @@ export const SHORTCUTS = {
   switchChat: { keys: 'mod+k', description: 'Switch chat' },
   documents: { keys: 'mod+d', description: 'Documents' },
   trace: { keys: 'mod+j', description: 'Trace & evaluation' },
+  batch: { keys: 'mod+b', description: 'Batch questions' },
   settings: { keys: 'mod+,', description: 'Settings' },
   focusInput: { keys: '/', description: 'Focus message box' },
 } as const;

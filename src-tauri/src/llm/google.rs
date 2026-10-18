@@ -254,6 +254,7 @@ impl LLMProvider for GoogleProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 

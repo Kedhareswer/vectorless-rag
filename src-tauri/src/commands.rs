@@ -573,49 +573,85 @@ pub async fn transcribe_audio(
 /// Clears existing summaries so they are regenerated, then saves the updated tree.
 /// Intentionally loads the SLM here since the user explicitly requested re-enrichment.
 #[tauri::command]
-pub fn reenrich_document(
+pub async fn reenrich_document(
     app: tauri::AppHandle,
-    db: State<Database>,
-    cache: State<Mutex<TreeCache>>,
+    db: State<'_, Database>,
+    cache: State<'_, Mutex<TreeCache>>,
     doc_id: String,
 ) -> Result<(), String> {
-    let mut tree = db
-        .get_document(&doc_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
-
-    // Try to load the SLM engine if a model is available
-    if let Ok(app_data) = app.path().app_data_dir() {
-        let status = local::check_local_model(&app_data, &db);
-        if let Some(model_path) = status.model_path {
-            let _ = local::load_engine(&model_path);
-        }
+    let mut results = reenrich_documents(app, db, cache, vec![doc_id]).await?;
+    match results.pop() {
+        Some(r) if r.error.is_none() => Ok(()),
+        Some(r) => Err(r.error.unwrap_or_default()),
+        None => Ok(()),
     }
+}
 
-    // Clear existing summaries on top-level nodes so they are regenerated
-    let root_id = tree.root_id.clone();
-    let child_ids: Vec<String> = tree
-        .get_node(&root_id)
-        .map(|r| r.children.clone())
-        .unwrap_or_default();
-    for child_id in &child_ids {
-        if let Some(node) = tree.nodes.get_mut(child_id) {
-            node.summary = None;
-            node.metadata.remove("entities");
-            node.metadata.remove("topics");
+/// Outcome of re-enriching one document in a batch.
+#[derive(serde::Serialize)]
+pub struct ReenrichResult {
+    pub doc_id: String,
+    /// Top-level nodes that got metadata.
+    pub nodes_enriched: usize,
+    /// Why this document failed; the rest of the batch still runs.
+    pub error: Option<String>,
+}
+
+/// Re-enrich several documents in one batch.
+///
+/// The SLM engine is loaded once for the whole batch rather than per document,
+/// and the work runs on a blocking thread so the window stays responsive.
+/// Documents are processed one at a time (generation is CPU-bound); one
+/// failing does not stop the others.
+#[tauri::command]
+pub async fn reenrich_documents(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+    cache: State<'_, Mutex<TreeCache>>,
+    doc_ids: Vec<String>,
+) -> Result<Vec<ReenrichResult>, String> {
+    let db_handle = db.inner().clone();
+    let app_data = app.path().app_data_dir().ok();
+
+    let (results, trees) = tokio::task::spawn_blocking(move || {
+        if let Some(app_data) = app_data {
+            let status = local::check_local_model(&app_data, &db_handle);
+            if let Some(model_path) = status.model_path {
+                let _ = local::load_engine(&model_path);
+            }
         }
-    }
+        let mut results = Vec::with_capacity(doc_ids.len());
+        let mut trees = Vec::new();
+        for doc_id in doc_ids {
+            let outcome = (|| -> Result<(usize, DocumentTree), String> {
+                let mut tree = db_handle
+                    .get_document(&doc_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+                let n = crate::document::metadata::reenrich_tree(&mut tree);
+                db_handle.save_document(&tree, None).map_err(|e| e.to_string())?;
+                Ok((n, tree))
+            })();
+            match outcome {
+                Ok((nodes_enriched, tree)) => {
+                    trees.push(tree);
+                    results.push(ReenrichResult { doc_id, nodes_enriched, error: None });
+                }
+                Err(e) => results.push(ReenrichResult { doc_id, nodes_enriched: 0, error: Some(e) }),
+            }
+        }
+        (results, trees)
+    })
+    .await
+    .map_err(|e| format!("Re-enrichment task failed: {}", e))?;
 
-    enrich_tree_metadata(&mut tree);
-
-    db.save_document(&tree, None).map_err(|e| e.to_string())?;
-
-    // Invalidate cache so next load gets fresh tree
+    // Swap the fresh trees into the cache so the next read sees them.
     let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
-    cache_guard.invalidate(&doc_id);
-    cache_guard.insert(doc_id, tree);
-
-    Ok(())
+    for tree in trees {
+        cache_guard.invalidate(&tree.id);
+        cache_guard.insert(tree.id.clone(), tree);
+    }
+    Ok(results)
 }
 
 // --- Image description command ---
@@ -682,6 +718,7 @@ pub async fn describe_image(
             tool_calls_raw: None,
             tool_call_id: None,
             tool_name: None,
+            cache: false,
         },
     ];
 
@@ -750,7 +787,7 @@ pub fn abort_query(
 // --- File dialog command ---
 
 #[tauri::command]
-pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let file = app
@@ -772,12 +809,15 @@ pub async fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, S
             "sh", "toml", "yaml", "yml", "json", "xml", "html", "css",
         ])
         .add_filter("All Files", &["*"])
-        .blocking_pick_file();
+        .blocking_pick_files();
 
-    match file {
-        Some(path) => Ok(Some(path.to_string())),
-        None => Ok(None),
-    }
+    // Multi-select: the frontend ingests every chosen file in one batch.
+    // Cancelling the dialog returns an empty list.
+    Ok(file
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.to_string())
+        .collect())
 }
 
 // --- Agent chat command ---
@@ -851,6 +891,101 @@ pub async fn chat_with_agent(
     }
 
     result
+}
+
+// --- Batch question commands (provider Batch API) ---
+
+/// A batch job with its questions and, once ended, answers.
+#[derive(serde::Serialize)]
+pub struct BatchJobDetail {
+    pub job: crate::db::BatchJobRecord,
+    pub items: Vec<crate::db::BatchItemRecord>,
+}
+
+fn provider_by_id(db: &Database, provider_id: &str) -> Result<ProviderConfig, String> {
+    db.get_providers()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| format!("Provider not found: {}", provider_id))
+}
+
+/// Answer many questions over a chat's documents in one provider batch.
+#[tauri::command]
+pub async fn submit_question_batch(
+    db: State<'_, Database>,
+    cache: State<'_, Mutex<TreeCache>>,
+    conv_id: Option<String>,
+    doc_ids: Vec<String>,
+    provider_id: String,
+    questions: Vec<String>,
+) -> Result<BatchJobDetail, String> {
+    if doc_ids.is_empty() {
+        return Err("Add a document to this chat first.".to_string());
+    }
+    for q in &questions {
+        validation::validate_chat_input(q, &doc_ids, &provider_id)?;
+    }
+    let provider_config = provider_by_id(&db, &provider_id)?;
+    let trees = {
+        let mut cache_guard = cache.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut trees = Vec::with_capacity(doc_ids.len());
+        for doc_id in &doc_ids {
+            let tree = match cache_guard.get(doc_id) {
+                Some(tree) => tree.clone(),
+                None => {
+                    let tree = db
+                        .get_document(doc_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("Document not found: {}", doc_id))?;
+                    cache_guard.insert(doc_id.clone(), tree.clone());
+                    tree
+                }
+            };
+            trees.push(tree);
+        }
+        trees
+    };
+    let (job, items) = crate::agent::batch::submit_batch(
+        &db,
+        provider_config,
+        conv_id,
+        &doc_ids,
+        trees,
+        questions,
+    )
+    .await?;
+    Ok(BatchJobDetail { job, items })
+}
+
+/// Poll a batch; stores the answers the first time it is seen ended.
+#[tauri::command]
+pub async fn refresh_question_batch(
+    db: State<'_, Database>,
+    job_id: String,
+) -> Result<BatchJobDetail, String> {
+    let job = db
+        .get_batch_job(&job_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Batch not found: {}", job_id))?;
+    let provider_config = provider_by_id(&db, &job.provider_id)?;
+    let (job, items) = crate::agent::batch::refresh_batch(&db, provider_config, &job_id).await?;
+    Ok(BatchJobDetail { job, items })
+}
+
+/// Batches submitted from one chat, newest first, with their items.
+#[tauri::command]
+pub async fn list_question_batches(
+    db: State<'_, Database>,
+    conv_id: String,
+) -> Result<Vec<BatchJobDetail>, String> {
+    let jobs = db.list_batch_jobs(&conv_id).map_err(|e| e.to_string())?;
+    jobs.into_iter()
+        .map(|job| {
+            let items = db.list_batch_items(&job.id).map_err(|e| e.to_string())?;
+            Ok(BatchJobDetail { job, items })
+        })
+        .collect()
 }
 
 // --- Clear app data command ---

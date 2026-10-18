@@ -62,7 +62,7 @@
     get_dictation_options: () => [],
     list_documents: () => docs.map((d) => ({ ...d })),
     get_document: () => contractTree,
-    open_file_dialog: () => 'C:/Users/me/Documents/Vendor-Contract-Acme.pdf',
+    open_file_dialog: () => ['C:/Users/me/Documents/Vendor-Contract-Acme.pdf'],
     ingest_document: async () => {
       await sleep(900);
       docs.push({ id: 'd1', name: contractTree.name, doc_type: 'pdf', created_at: now });

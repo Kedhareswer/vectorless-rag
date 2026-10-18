@@ -149,6 +149,7 @@ impl LLMProvider for OpenRouterProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 

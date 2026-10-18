@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 400" width="880" height="400" role="img" aria-labelledby="t d">
+  <title id="t">Chunked RAG versus Tree-Grounded Generation</title>
+  <desc id="d">Left: a document split into chunks, retrieved as shuffled fragments by similarity. Right: the same document kept as a tree; the query walks from the section to the token table and follows the cross-reference to the refresh flow.</desc>
+  <style>
+    .bg { fill: #F4F3EE; }
+    .card { fill: #FFFFFF; stroke: #E7E5E0; stroke-width: 1; }
+    .h { font: 600 15px system-ui, -apple-system, "Segoe UI", Inter, sans-serif; fill: #1C1917; }
+    .sub { font: 12px system-ui, -apple-system, "Segoe UI", Inter, sans-serif; fill: #78716C; }
+    .t { font: 12px system-ui, -apple-system, "Segoe UI", Inter, sans-serif; fill: #1C1917; }
+    .mono { font: 11px "JetBrains Mono", ui-monospace, Consolas, monospace; fill: #78716C; }
+    .chunk { fill: #EDEAE3; stroke: #D6D3CD; }
+    .node { fill: #FFFFFF; stroke: #D6D3CD; stroke-width: 1.2; }
+    .edge { stroke: #D6D3CD; stroke-width: 1.5; fill: none; }
+    .xref { stroke: #DE7356; stroke-width: 1.5; fill: none; stroke-dasharray: 4 4; opacity: .35; }
+    .pill { fill: #1C1917; }
+    .pillt { font: 600 12px system-ui, -apple-system, "Segoe UI", Inter, sans-serif; fill: #F4F3EE; }
+    .bad { fill: #B91C1C; font: 600 11px system-ui, -apple-system, "Segoe UI", Inter, sans-serif; }
+    .good { fill: #15803D; font: 600 11px system-ui, -apple-system, "Segoe UI", Inter, sans-serif; }
+
+    /* One 7s loop. Each lit node turns accent at its step and stays lit. */
+    .lit { animation: lit 7s infinite both; }
+    .s1 { animation-delay: 0s; } .s2 { animation-delay: .9s; } .s3 { animation-delay: 1.8s; } .s4 { animation-delay: 2.7s; }
+    @keyframes lit {
+      0%, 8%   { fill: #FFFFFF; stroke: #D6D3CD; }
+      14%, 86% { fill: #FBE9E3; stroke: #DE7356; }
+      96%,100% { fill: #FFFFFF; stroke: #D6D3CD; }
+    }
+    .path { stroke: #DE7356; stroke-width: 2.2; fill: none; stroke-dasharray: 120; stroke-dashoffset: 120; animation: draw 7s infinite both; }
+    .p2 { animation-delay: .9s; } .p3 { animation-delay: 1.8s; } .p4 { animation-delay: 2.7s; }
+    @keyframes draw {
+      0%, 6%   { stroke-dashoffset: 120; }
+      14%, 86% { stroke-dashoffset: 0; }
+      96%,100% { stroke-dashoffset: 120; opacity: 0; }
+    }
+    .frag { animation: shuffle 7s infinite both; opacity: 0; }
+    .f1 { animation-delay: .4s; } .f2 { animation-delay: 1.2s; } .f3 { animation-delay: 2s; }
+    @keyframes shuffle {
+      0%, 6%   { opacity: 0; transform: translateY(8px); }
+      14%, 86% { opacity: 1; transform: translateY(0); }
+      96%,100% { opacity: 0; }
+    }
+    .verdict { animation: verdict 7s infinite both; opacity: 0; }
+    @keyframes verdict { 0%, 50% { opacity: 0; } 58%, 88% { opacity: 1; } 96%, 100% { opacity: 0; } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .lit, .path, .frag, .verdict { animation: none; }
+      .lit { fill: #FBE9E3; stroke: #DE7356; }
+      .path { stroke-dashoffset: 0; }
+      .frag, .verdict { opacity: 1; }
+    }
+  </style>
+
+  <rect class="bg" width="880" height="400" rx="14"/>
+
+  <!-- Query -->
+  <rect class="pill" x="300" y="16" width="280" height="30" rx="15"/>
+  <text class="pillt" x="440" y="36" text-anchor="middle">"When does a refresh token expire?"</text>
+
+  <!-- ───────── Left: chunked RAG ───────── -->
+  <rect class="card" x="20" y="60" width="400" height="320" rx="10"/>
+  <text class="h" x="40" y="88">Chunked RAG</text>
+  <text class="sub" x="40" y="106">split → embed → cosine top-k</text>
+
+  <rect class="chunk" x="40" y="124" width="360" height="40" rx="6"/>
+  <text class="mono" x="52" y="148">…Bearer expires in 24h read/write Refresh expires…</text>
+  <rect class="chunk" x="40" y="172" width="360" height="40" rx="6"/>
+  <text class="mono" x="52" y="196">…tokens issued on login the refresh flow handles…</text>
+  <rect class="chunk" x="40" y="220" width="360" height="40" rx="6"/>
+  <text class="mono" x="52" y="244">…step 1 call the refresh endpoint with the curr…</text>
+
+  <g class="frag f1"><text class="sub" x="40" y="290">#2 · 0.81  no heading — which section?</text></g>
+  <g class="frag f2"><text class="sub" x="40" y="310">#1 · 0.79  table flattened into a string</text></g>
+  <g class="frag f3"><text class="sub" x="40" y="330">#3 · 0.74  "see §3.3" points nowhere</text></g>
+  <g class="verdict"><text class="bad" x="40" y="360">✕ fragments, no structure, no trail</text></g>
+
+  <!-- ───────── Right: TGG ───────── -->
+  <rect class="card" x="460" y="60" width="400" height="320" rx="10"/>
+  <text class="h" x="480" y="88">TGG — tree-grounded</text>
+  <text class="sub" x="480" y="106">parse → tree → deterministic walk</text>
+
+  <!-- static edges: trunk on the left, one branch per section -->
+  <path class="edge" d="M505 152 V 182 H 525"/>
+  <path class="edge" d="M505 152 V 252 H 525"/>
+  <path class="edge" d="M505 152 V 322 H 525"/>
+  <path class="edge" d="M665 182 H 700"/>
+  <!-- cross reference: the table row's "see §3.3" -->
+  <path class="xref" d="M775 205 C 820 250, 790 322, 725 322"/>
+
+  <!-- traversal path, drawn step by step -->
+  <path class="path"    d="M505 152 V 182 H 525"/>
+  <path class="path p2" d="M665 182 H 700"/>
+  <path class="path p3" d="M775 205 C 820 250, 790 322, 725 322"/>
+
+  <!-- nodes -->
+  <rect class="node lit s1" x="490" y="124" width="160" height="28" rx="6"/>
+  <text class="t" x="502" y="143">§3 Authentication</text>
+
+  <rect class="node lit s2" x="525" y="168" width="140" height="28" rx="6"/>
+  <text class="t" x="537" y="187">§3.1 Token Types</text>
+
+  <rect class="node lit s3" x="700" y="159" width="150" height="46" rx="6"/>
+  <text class="mono" x="710" y="177">Refresh │ 30d │ read</text>
+  <text class="mono" x="710" y="195">Bearer  │ 24h │ r/w</text>
+
+  <rect class="node" x="525" y="238" width="140" height="28" rx="6"/>
+  <text class="t" x="537" y="257">§3.2 Authorization</text>
+
+  <rect class="node lit s4" x="525" y="308" width="200" height="28" rx="6"/>
+  <text class="t" x="537" y="327">§3.3 Refresh Flow  ← "see §3.3"</text>
+
+  <g class="verdict"><text class="good" x="480" y="360">✓ the row, its section, and the cross-reference</text></g>
+</svg>

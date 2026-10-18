@@ -27,6 +27,12 @@ pub struct Message {
     /// For tool result messages, the tool name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Mark a prompt-cache breakpoint after this message. Everything up to and
+    /// including it is cached, so the next query that repeats the same prefix
+    /// pays a fraction of the input cost. Providers without prompt caching
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache: bool,
 }
 
 impl Message {
@@ -38,6 +44,15 @@ impl Message {
             tool_calls_raw: None,
             tool_call_id: None,
             tool_name: None,
+            cache: false,
+        }
+    }
+
+    /// Like [`Message::text`], with a prompt-cache breakpoint after it.
+    pub fn cached_text(role: &str, content: &str) -> Self {
+        Self {
+            cache: true,
+            ..Self::text(role, content)
         }
     }
 
@@ -50,6 +65,7 @@ impl Message {
             tool_calls_raw: Some(tool_calls_raw),
             tool_call_id: None,
             tool_name: None,
+            cache: false,
         }
     }
 
@@ -61,6 +77,7 @@ impl Message {
             tool_calls_raw: None,
             tool_call_id: Some(tool_call_id.to_string()),
             tool_name: Some(tool_name.to_string()),
+            cache: false,
         }
     }
 }
@@ -81,7 +98,7 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct LLMResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
@@ -90,6 +107,12 @@ pub struct LLMResponse {
     pub tokens_used: u32,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Input tokens written to the prompt cache, billed above the input rate.
+    /// Zero for providers without prompt caching.
+    pub cache_write_tokens: u32,
+    /// Input tokens served from the prompt cache, billed well below the input
+    /// rate. Zero for providers without prompt caching.
+    pub cache_read_tokens: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]

@@ -147,6 +147,7 @@ impl LLMProvider for GroqProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 

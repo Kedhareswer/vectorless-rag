@@ -183,6 +183,7 @@ impl LLMProvider for OpenAICompatProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 
@@ -330,6 +331,7 @@ impl LLMProvider for OpenAICompatProvider {
             tokens_used,
             input_tokens,
             output_tokens,
+            ..Default::default()
         })
     }
 

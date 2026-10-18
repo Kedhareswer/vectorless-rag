@@ -156,7 +156,8 @@ export const chatWithAgent = (
 export const abortQuery = () => invoke<void>('abort_query');
 
 // File dialog
-export const openFileDialog = () => invoke<string | null>('open_file_dialog');
+/** Multi-select file picker; resolves to [] when cancelled. */
+export const openFileDialog = () => invoke<string[]>('open_file_dialog');
 
 // Traces
 export const getTraces = (convId: string) => invoke<TraceRecord[]>('get_traces', { convId });
@@ -308,6 +309,61 @@ export const describeImage = (docId: string, nodeId: string, imagePath: string) 
 // Re-enrich an already-ingested document with the local model (or heuristics if no model).
 export const reenrichDocument = (docId: string) =>
   invoke<void>('reenrich_document', { docId });
+
+export interface ReenrichResult {
+  doc_id: string;
+  nodes_enriched: number;
+  /** Set when this document failed; the rest of the batch still ran. */
+  error: string | null;
+}
+
+// Re-enrich several documents in one batch (model loaded once, off the UI thread).
+export const reenrichDocuments = (docIds: string[]) =>
+  invoke<ReenrichResult[]>('reenrich_documents', { docIds });
+
+// --- Batch questions (provider Batch API) ---
+
+export interface BatchJob {
+  id: string;
+  conv_id: string | null;
+  provider_id: string;
+  provider_batch_id: string;
+  /** `in_progress`, `canceling` or `ended`. */
+  status: string;
+  created_at: string;
+  ended_at: string | null;
+  results_fetched: boolean;
+}
+
+export interface BatchItem {
+  job_id: string;
+  custom_id: string;
+  question: string;
+  answer: string | null;
+  error: string | null;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface BatchJobDetail {
+  job: BatchJob;
+  items: BatchItem[];
+}
+
+/** Answer many questions over the chat's documents in one provider batch. */
+export const submitQuestionBatch = (
+  convId: string | null,
+  docIds: string[],
+  providerId: string,
+  questions: string[],
+) => invoke<BatchJobDetail>('submit_question_batch', { convId, docIds, providerId, questions });
+
+/** Poll a batch; answers are stored the first time it is seen ended. */
+export const refreshQuestionBatch = (jobId: string) =>
+  invoke<BatchJobDetail>('refresh_question_batch', { jobId });
+
+export const listQuestionBatches = (convId: string) =>
+  invoke<BatchJobDetail[]>('list_question_batches', { convId });
 
 // Clear ALL app data (DB, model file, keychain). Frontend must reload after this.
 export const clearAppData = () => invoke<void>('clear_app_data');

@@ -91,6 +91,7 @@ impl LLMProvider for LocalProvider {
             tokens_used: generation.prompt_tokens + generation.output_tokens,
             input_tokens: generation.prompt_tokens,
             output_tokens: generation.output_tokens,
+            ..Default::default()
         })
     }
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "TGG — Tree-Grounded Generation"
 authors = ["you"]
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"  # oar-ocr (OCR backend) needs 1.95
 
 [lib]
 name = "vectorless_rag_lib"
@@ -45,12 +45,22 @@ candle-core = "0.11"
 candle-transformers = "0.11"
 candle-nn = "0.11"
 tokenizers = "0.23"
-# Layout-aware PDF parsing. OCR backends (tesseract / oar-ocr) are off: both pull
-# large native toolchains; scanned PDFs fall back to the pdf-extract parser.
-liteparse = { version = "2.15", default-features = false }
+# Layout-aware PDF parsing. Tesseract stays off (needs a native toolchain); the
+# ONNX backend reads scanned PDFs, downloading its models on first use.
+# shortcut: liteparse's oar-ocr 0.8 asks for ort "2.0.0-rc.12" but every 2.0.0
+# pre-release satisfies that, and rc.13 dropped `CPUExecutionProvider`, so
+# Cargo.lock pins ort to rc.12. Drop the pin once oar-ocr builds on a later rc.
+liteparse = { version = "2.15", default-features = false, features = ["oar-ocr-auto-download"] }
 # PDFium loader used by liteparse. Depended on directly so build.rs receives
 # DEP_PDFIUM_LIB_PATH and can bundle the shared library with the app.
 pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.11" }
+# ONNX Runtime, pulled in by the OCR backend. Declared here only to turn on
+# `load-dynamic`. Static linking is not an option on Windows: pyke's prebuilt
+# onnxruntime.lib is built against the static MSVC CRT, while PDFium and std
+# use the dynamic one, and linking both fails (LNK2005, and LNK1319 once the
+# static CRT is excluded). Loading a DLL at runtime keeps one CRT in the link.
+# The DLL is not shipped by ort — see `ocr_engine` in document/liteparse.rs.
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 
 [dev-dependencies]
 tempfile = "3"
