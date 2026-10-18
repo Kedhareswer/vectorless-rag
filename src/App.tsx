@@ -9,6 +9,7 @@ import { SlidePanel } from './components/common/SlidePanel';
 import { ChatPanel } from './components/chat/ChatPanel';
 import { DocsPanel } from './components/preview/DocsPanel';
 import { TracePanel } from './components/preview/TracePanel';
+import { BatchPanel } from './components/preview/BatchPanel';
 import { SettingsModal } from './components/settings/SettingsModal';
 import { ModelDownloadDialog } from './components/common/ModelDownloadDialog';
 import { useGuidesStore } from './stores/guides';
@@ -29,6 +30,7 @@ function App() {
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [showDocsPanel, setShowDocsPanel] = useState(false);
   const [showTracePanel, setShowTracePanel] = useState(false);
+  const [showBatchPanel, setShowBatchPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showModelDialog, setShowModelDialog] = useState(false);
 
@@ -77,6 +79,10 @@ function App() {
     setShowDocsPanel((v) => !v);
   }, []);
 
+  const toggleBatchPanel = useCallback(() => {
+    setShowBatchPanel((v) => !v);
+  }, []);
+
   const toggleTracePanel = useCallback(() => {
     setShowTracePanel((v) => !v);
   }, []);
@@ -104,6 +110,7 @@ function App() {
     switchChat: () => setShowSwitcher((v) => !v),
     documents: toggleDocsPanel,
     trace: toggleTracePanel,
+    batch: toggleBatchPanel,
     settings: () => setShowSettings(true),
     focusInput,
   });
@@ -120,6 +127,8 @@ function App() {
         onDocsToggle={toggleDocsPanel}
         tracePanelOpen={showTracePanel}
         onTraceToggle={toggleTracePanel}
+        batchPanelOpen={showBatchPanel}
+        onBatchToggle={toggleBatchPanel}
         onSettingsClick={() => setShowSettings(true)}
       />
 
@@ -140,6 +149,13 @@ function App() {
       {showDocsPanel && (
         <SlidePanel title="Documents" onClose={() => setShowDocsPanel(false)}>
           <DocsPanel />
+        </SlidePanel>
+      )}
+
+      {/* Batch questions slide-over panel */}
+      {showBatchPanel && (
+        <SlidePanel title="Batch Questions" onClose={() => setShowBatchPanel(false)}>
+          <BatchPanel />
         </SlidePanel>
       )}
 

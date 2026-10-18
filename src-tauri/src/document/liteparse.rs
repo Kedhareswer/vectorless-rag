@@ -6,13 +6,15 @@
 //! the build bundles it next to the executable (see `build.rs`). If PDFium can't
 //! be loaded, `is_available()` is false and the caller falls back to pdf-extract.
 //!
-//! OCR is not compiled in, so scanned (image-only) PDFs produce no blocks and
-//! also fall back.
+//! A scanned (image-only) PDF yields no blocks on the first pass, so it is
+//! parsed a second time with the ONNX OCR backend (see `ocr_engine`).
 
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use liteparse::layout::LayoutBlock;
+use liteparse::ocr::OcrEngine;
+use liteparse::ocr::oar::OarOcrEngine;
 use liteparse::{LiteParse, LiteParseConfig, OutputFormat};
 
 use super::tree::{DocType, DocumentTree, NodeType, TreeNode};
@@ -31,6 +33,7 @@ static AVAILABLE: OnceLock<bool> = OnceLock::new();
 /// any parsing; if it isn't found there, the default search (env var, build
 /// directory, next to the executable, system paths) still applies.
 pub fn configure_library_dir(dir: &Path) {
+    let _ = RESOURCE_DIR.set(dir.to_path_buf());
     let path = dir.join(PDFIUM_LIB_NAME);
     if path.exists()
         && let Err(e) = pdfium_sys::dynamic::load(&path)
@@ -50,15 +53,86 @@ pub fn is_available() -> bool {
     })
 }
 
-/// Parse a PDF into a document tree. Errors (including "no content", e.g. a
-/// scanned PDF without OCR) let the caller fall back to another parser.
+/// Cached OCR engine. Built on the first scanned PDF, not at startup: the
+/// constructor loads the ONNX models (downloading them on first use).
+static OCR_ENGINE: Mutex<Option<Arc<dyn OcrEngine>>> = Mutex::new(None);
+
+/// The app's `resources/` directory, recorded by `configure_library_dir`.
+static RESOURCE_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+const ORT_LIB_NAME: &str = "onnxruntime.dll";
+#[cfg(target_os = "macos")]
+const ORT_LIB_NAME: &str = "libonnxruntime.dylib";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const ORT_LIB_NAME: &str = "libonnxruntime.so";
+
+/// Point `ort` at the bundled ONNX Runtime.
+///
+/// `ort` is built with `load-dynamic`, so it loads the library by path at
+/// runtime and ships none itself. If the library is missing, say so instead of
+/// letting `ort` block while it searches: a scanned PDF then falls back to the
+/// pdf-extract parser, the same as before OCR existed.
+fn configure_ort() -> Result<(), String> {
+    let dir = RESOURCE_DIR
+        .get()
+        .ok_or("OCR unavailable: resource directory not configured")?;
+    let lib = dir.join(ORT_LIB_NAME);
+    if !lib.exists() {
+        return Err(format!(
+            "OCR unavailable: {} not found in {}",
+            ORT_LIB_NAME,
+            dir.display()
+        ));
+    }
+    // SAFETY: single-threaded startup path for this engine; `ort` reads the
+    // variable when it first loads the library.
+    unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib) };
+    Ok(())
+}
+
+/// The ONNX OCR pipeline (PP-OCRv6 small). `oar-ocr` downloads the detection
+/// model, recognition model and dictionary on first use, verifies their
+/// SHA-256 and caches them under `$OAR_HOME` (default `~/.oar`).
+fn ocr_engine() -> Result<Arc<dyn OcrEngine>, String> {
+    let mut slot = OCR_ENGINE
+        .lock()
+        .map_err(|_| "OCR engine lock poisoned".to_string())?;
+    if let Some(engine) = slot.as_ref() {
+        return Ok(engine.clone());
+    }
+    configure_ort()?;
+    let engine: Arc<dyn OcrEngine> = Arc::new(
+        OarOcrEngine::ppocr_v6_small().map_err(|e| format!("OCR engine unavailable: {}", e))?,
+    );
+    *slot = Some(engine.clone());
+    Ok(engine)
+}
+
+/// Parse a PDF into a document tree. Pages with a text layer are read
+/// directly; a document that yields nothing that way is scanned, so it is
+/// parsed again with OCR. Errors let the caller fall back to another parser.
 pub fn parse_pdf(file_path: &str, file_name: String) -> Result<DocumentTree, String> {
     if !is_available() {
         return Err("LiteParse not available".to_string());
     }
 
+    match parse_with(file_path, file_name.clone(), false) {
+        Ok(tree) => Ok(tree),
+        Err(e) if e == NO_CONTENT => {
+            eprintln!("LiteParse: no text layer in {}, running OCR", file_path);
+            parse_with(file_path, file_name, true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Error returned when a parse produced no usable nodes.
+const NO_CONTENT: &str = "LiteParse returned no content";
+
+fn parse_with(file_path: &str, file_name: String, ocr: bool) -> Result<DocumentTree, String> {
     let config = LiteParseConfig {
-        ocr_enabled: false,
+        ocr_enabled: ocr,
         output_format: OutputFormat::Json,
         extract_blocks: true,
         extract_links: false,
@@ -66,6 +140,9 @@ pub fn parse_pdf(file_path: &str, file_name: String) -> Result<DocumentTree, Str
         quiet: true,
         ..Default::default()
     };
+    // Built before the worker thread so a model download failure is reported
+    // as itself rather than as a parse error.
+    let engine = if ocr { Some(ocr_engine()?) } else { None };
 
     // `LiteParse::parse` is async. Run it on its own thread + runtime so this
     // works whether or not the caller is already inside a Tokio runtime.
@@ -75,8 +152,12 @@ pub fn parse_pdf(file_path: &str, file_name: String) -> Result<DocumentTree, Str
             .enable_all()
             .build()
             .map_err(|e| format!("LiteParse runtime error: {}", e))?;
+        let parser = match engine {
+            Some(engine) => LiteParse::new(config).with_ocr_engine(engine),
+            None => LiteParse::new(config),
+        };
         runtime
-            .block_on(LiteParse::new(config).parse(&path))
+            .block_on(parser.parse(&path))
             .map_err(|e| format!("LiteParse error: {}", e))
     })
     .join()
@@ -94,7 +175,7 @@ pub fn parse_pdf(file_path: &str, file_name: String) -> Result<DocumentTree, Str
 
     let tree = build_tree(file_name, result.total_pages as usize, &pages);
     if tree.nodes.len() <= 1 {
-        return Err("LiteParse returned no content".to_string());
+        return Err(NO_CONTENT.to_string());
     }
     Ok(tree)
 }
@@ -317,6 +398,25 @@ mod tests {
         let tree = parse_pdf(path.to_str().unwrap(), "hello.pdf".to_string()).unwrap();
         let all_text: String = tree.nodes.values().map(|n| n.content.clone()).collect();
         assert!(all_text.contains("Hello LiteParse"), "got: {}", all_text);
+    }
+
+    #[test]
+    fn ocr_reads_a_scanned_pdf() {
+        // Opt-in: point `TGG_SCANNED_PDF` at an image-only PDF. Downloads the
+        // OCR models on first run, so it stays out of the default test run.
+        let Ok(path) = std::env::var("TGG_SCANNED_PDF") else {
+            return;
+        };
+        if !is_available() {
+            return;
+        }
+        let tree = parse_pdf(&path, "scanned.pdf".to_string()).unwrap();
+        let all_text: String = tree.nodes.values().map(|n| n.content.clone()).collect();
+        assert!(
+            all_text.split_whitespace().count() > 5,
+            "OCR produced no text: {}",
+            all_text
+        );
     }
 
     /// Build a one-page PDF with a single line of Helvetica text.

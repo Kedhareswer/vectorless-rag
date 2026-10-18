@@ -202,7 +202,7 @@ impl Database {
     }
 
     /// Current schema version. Bump this when adding a new migration.
-    const LATEST_VERSION: i64 = 3;
+    const LATEST_VERSION: i64 = 4;
 
     fn run_migrations(&self) -> Result<(), DbError> {
         let conn = self.conn()?;
@@ -224,6 +224,7 @@ impl Database {
             Self::migrate_v0_to_v1,
             Self::migrate_v1_to_v2,
             Self::migrate_v2_to_v3,
+            Self::migrate_v3_to_v4,
         ];
         assert!(migrations.len() as i64 == Self::LATEST_VERSION,
             "Migration count ({}) does not match LATEST_VERSION ({})", migrations.len(), Self::LATEST_VERSION);
@@ -309,6 +310,39 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
             params![3i64],
+        )?;
+        Ok(())
+    }
+
+    /// V3→V4: Add batch_jobs / batch_items for the provider Batch API.
+    fn migrate_v3_to_v4(&self) -> Result<(), DbError> {
+        let conn = self.conn()?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS batch_jobs (
+                id TEXT PRIMARY KEY,
+                conv_id TEXT,
+                provider_id TEXT NOT NULL,
+                provider_batch_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                ended_at TEXT,
+                results_fetched INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS batch_items (
+                job_id TEXT NOT NULL,
+                custom_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT,
+                error TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (job_id, custom_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_batch_jobs_conv ON batch_jobs(conv_id);"
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+            params![4i64],
         )?;
         Ok(())
     }

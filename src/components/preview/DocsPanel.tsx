@@ -4,8 +4,8 @@ import clsx from 'clsx';
 import { useDocumentsStore } from '../../stores/documents';
 import { useChatStore } from '../../stores/chat';
 import { useLocalModelStore } from '../../stores/localModel';
-import { getCrossDocRelations, reenrichDocument } from '../../lib/tauri';
-import { useAddDocument } from '../../hooks/useAddDocument';
+import { getCrossDocRelations, reenrichDocument, reenrichDocuments } from '../../lib/tauri';
+import { useAddDocument, batchLabel } from '../../hooks/useAddDocument';
 import { TreeView } from './TreeView';
 import styles from './DocsPanel.module.css';
 
@@ -16,11 +16,10 @@ export function DocsPanel() {
   const {
     documents,
     activeDocumentId,
-    isIngesting,
     error: docError,
     setActiveDocument,
   } = useDocumentsStore();
-  const { pickAndAdd, addFromPath } = useAddDocument();
+  const { pickAndAdd, addManyFromPaths, isIngesting, progress } = useAddDocument();
 
   const {
     activeConversationId,
@@ -67,6 +66,24 @@ export function DocsPanel() {
     }
   }, []);
 
+  /** Re-enrich every document in this chat as one batch. */
+  const handleReenrichAll = useCallback(async () => {
+    const ids = conversationDocIds;
+    if (ids.length === 0) return;
+    setReenrichState((prev) => ({ ...prev, ...Object.fromEntries(ids.map((id) => [id, 'running'])) }));
+    try {
+      const results = await reenrichDocuments(ids);
+      setReenrichState((prev) => ({
+        ...prev,
+        ...Object.fromEntries(results.map((r) => [r.doc_id, r.error ? 'idle' : 'done'])),
+      }));
+    } catch {
+      setReenrichState((prev) => ({ ...prev, ...Object.fromEntries(ids.map((id) => [id, 'idle'])) }));
+    }
+  }, [conversationDocIds]);
+
+  const isBatchEnriching = conversationDocIds.some((id) => reenrichState[id] === 'running');
+
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(true);
@@ -80,13 +97,11 @@ export function DocsPanel() {
   const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    const files = e.dataTransfer.files;
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const filePath = (file as unknown as { path?: string }).path ?? file.name;
-      if (filePath) await addFromPath(filePath);
-    }
-  }, [addFromPath]);
+    const paths = Array.from(e.dataTransfer.files)
+      .map((file) => (file as unknown as { path?: string }).path ?? file.name)
+      .filter(Boolean);
+    await addManyFromPaths(paths);
+  }, [addManyFromPaths]);
 
   if (!activeConversationId) {
     return (
@@ -117,6 +132,17 @@ export function DocsPanel() {
       <div className={styles.section}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span className={styles.sectionTitle}>Chat Documents</span>
+          {conversationDocIds.length > 1 && (
+            <button
+              type="button"
+              className={styles.docAction}
+              onClick={() => void handleReenrichAll()}
+              disabled={isBatchEnriching}
+              title="Re-enrich all documents in this chat"
+            >
+              <RefreshCw size={12} className={isBatchEnriching ? styles.spinner : undefined} />
+            </button>
+          )}
           {relationCount > 0 && (
             <span className={styles.relationBadge}>
               <Link2 size={10} />
@@ -173,7 +199,7 @@ export function DocsPanel() {
           {isIngesting ? (
             <>
               <Loader size={14} className={styles.spinner} />
-              <span>Ingesting...</span>
+              <span>{batchLabel(progress, 'Ingesting...')}</span>
             </>
           ) : (
             <>

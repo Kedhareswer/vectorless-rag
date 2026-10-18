@@ -120,6 +120,10 @@ pub fn run() {
             commands::transcribe_audio,
             commands::describe_image,
             commands::reenrich_document,
+            commands::reenrich_documents,
+            commands::submit_question_batch,
+            commands::refresh_question_batch,
+            commands::list_question_batches,
             commands::clear_app_data,
         ])
         .setup(|app| {

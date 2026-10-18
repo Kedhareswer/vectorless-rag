@@ -11,7 +11,7 @@ import { chatWithAgent, abortQuery, type ChatEvent } from '../../lib/tauri';
 import { ProcessSummary } from './ProcessSummary';
 import { ChatEmptyState } from './ChatEmptyState';
 import { ModelPicker } from './ModelPicker';
-import { useAddDocument } from '../../hooks/useAddDocument';
+import { useAddDocument, batchLabel } from '../../hooks/useAddDocument';
 import { useLocalModelStore } from '../../stores/localModel';
 import { isLocalProvider } from '../../lib/providers';
 import { useLocalServersStore, firstUsableServer } from '../../stores/localServers';
@@ -49,7 +49,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
   } = useChatStore();
 
   const { documents } = useDocumentsStore();
-  const { pickAndAdd, addFromPath, isIngesting } = useAddDocument();
+  const { pickAndAdd, addManyFromPaths, isIngesting, progress } = useAddDocument();
   const { providers, activeProviderId } = useSettingsStore();
 
   const activeProvider = providers.find((p) => p.id === activeProviderId);
@@ -191,10 +191,10 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-    for (const file of Array.from(e.dataTransfer.files)) {
-      const filePath = (file as unknown as { path?: string }).path ?? file.name;
-      if (filePath) await addFromPath(filePath);
-    }
+    const paths = Array.from(e.dataTransfer.files)
+      .map((file) => (file as unknown as { path?: string }).path ?? file.name)
+      .filter(Boolean);
+    await addManyFromPaths(paths);
   };
 
   const convDocNames = conversationDocIds
@@ -328,7 +328,7 @@ export function ChatPanel({ onOpenSettings, onOpenDocs, onSetupOffline }: ChatPa
               title="Add a document to this chat"
             >
               {isIngesting ? <LoaderCircle size={12} className={styles.spin} /> : <Plus size={12} />}
-              <span>{isIngesting ? 'Adding…' : convDocNames.length > 0 ? 'Add' : 'Add document'}</span>
+              <span>{isIngesting ? batchLabel(progress, 'Adding…') : convDocNames.length > 0 ? 'Add' : 'Add document'}</span>
             </button>
             <ModelPicker onOpenSettings={() => onOpenSettings?.()} />
           </div>
